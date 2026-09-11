@@ -2,6 +2,8 @@ name: Processar documentos
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "*/59 * * * *"   # a cada 59 minutos, ajuste como quiser
 
 jobs:
   processar:
