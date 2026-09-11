@@ -1,0 +1,35 @@
+name: Processar documentos
+
+on:
+  workflow_dispatch:
+
+jobs:
+  processar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependências de sistema (PDF)
+        run: sudo apt-get update && sudo apt-get install -y poppler-utils
+
+      - name: Instalar dependências Python
+        run: pip install -r requirements.txt
+
+      - name: Classificar e extrair documentos
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python process_document.py
+
+      - name: Gravar dados aprovados no Odoo
+        env:
+          ODOO_URL: ${{ secrets.ODOO_URL }}
+          ODOO_DB: ${{ secrets.ODOO_DB }}
+          ODOO_EMAIL: ${{ secrets.ODOO_EMAIL }}
+          ODOO_API_KEY: ${{ secrets.ODOO_API_KEY }}
+        run: python write_to_odoo.py
