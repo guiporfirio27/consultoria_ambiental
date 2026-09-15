@@ -2,9 +2,14 @@
 Baixa arquivos novos da pasta de inbox no Google Drive para ./inbox/, antes
 de process_document.py rodar.
 
-Depois de baixar com sucesso, move o arquivo (no Drive) para uma subpasta
-"Processados" -- não apaga, mantém rastro do que já passou pelo pipeline e
-evita reprocessar o mesmo arquivo na próxima execução.
+NÃO move nada no Drive aqui -- só baixa, e grava um mapa (nome do arquivo
+local -> id do arquivo no Drive) em ./drive_mapa.json. Quem decide se um
+arquivo pode ser marcado como concluído no Drive é o
+marcar_drive_concluido.py, no final do workflow, depois de confirmar que o
+pipeline inteiro terminou aquele arquivo -- assim, se qualquer etapa
+seguinte falhar no meio do caminho, o arquivo continua na pasta de entrada
+do Drive na próxima execução, em vez de ficar "perdido" numa pasta
+intermediária sem nunca ter sido gravado no Odoo.
 
 Variável de ambiente esperada:
   GOOGLE_SERVICE_ACCOUNT_JSON -- conteúdo completo do arquivo .json da
@@ -22,34 +27,13 @@ from googleapiclient.http import MediaIoBaseDownload
 
 PASTA_INBOX_ID = "1y3CL2y8m7xMb9I7ZPKT0ctVt0mDILzRR"
 INBOX_LOCAL = Path("./inbox")
-NOME_SUBPASTA_PROCESSADOS = "Processados"
+MAPA_PATH = Path("./drive_mapa.json")
 
 credenciais = service_account.Credentials.from_service_account_info(
     json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]),
     scopes=["https://www.googleapis.com/auth/drive"],
 )
 drive = build("drive", "v3", credentials=credenciais)
-
-
-def obter_ou_criar_subpasta_processados() -> str:
-    query = (
-        f"'{PASTA_INBOX_ID}' in parents and name = '{NOME_SUBPASTA_PROCESSADOS}' "
-        "and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
-    )
-    resultado = drive.files().list(q=query, fields="files(id)").execute()
-    achados = resultado.get("files", [])
-    if achados:
-        return achados[0]["id"]
-
-    nova = drive.files().create(
-        body={
-            "name": NOME_SUBPASTA_PROCESSADOS,
-            "mimeType": "application/vnd.google-apps.folder",
-            "parents": [PASTA_INBOX_ID],
-        },
-        fields="id",
-    ).execute()
-    return nova["id"]
 
 
 def main():
@@ -61,10 +45,10 @@ def main():
 
     if not arquivos:
         print("Nenhum arquivo novo na pasta do Drive.")
+        MAPA_PATH.write_text(json.dumps({}))
         return
 
-    subpasta_processados_id = obter_ou_criar_subpasta_processados()
-
+    mapa = {}
     for arquivo in arquivos:
         destino_local = INBOX_LOCAL / arquivo["name"]
         request = drive.files().get_media(fileId=arquivo["id"])
@@ -74,15 +58,10 @@ def main():
             while not concluido:
                 _, concluido = downloader.next_chunk()
 
-        # Move para Processados/ dentro do Drive -- não apaga, evita
-        # reprocessar o mesmo arquivo na próxima execução do workflow.
-        drive.files().update(
-            fileId=arquivo["id"],
-            addParents=subpasta_processados_id,
-            removeParents=PASTA_INBOX_ID,
-        ).execute()
-
+        mapa[arquivo["name"]] = arquivo["id"]
         print(f"Baixado: {arquivo['name']}")
+
+    MAPA_PATH.write_text(json.dumps(mapa, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":
