@@ -81,6 +81,34 @@ def buscar_partner_por_cpf(cpf: str):
     return ids[0] if ids else None
 
 
+def encontrar_arquivo_original(caminho_json: Path):
+    """O .json e o arquivo original compartilham o mesmo nome-base (stem);
+    só muda a extensão. Acha o irmão binário do .json."""
+    for candidato in PROCESSADOS_DIR.glob(f"{caminho_json.stem}.*"):
+        if candidato.suffix != ".json":
+            return candidato
+    return None
+
+
+def anexar_arquivo(caminho_arquivo: Path, res_model: str, res_id: int):
+    """Anexa o documento original no registro certo do Odoo (ir.attachment) --
+    é isso que vira o 'banco de documentos' navegável, e o que faz esse
+    arquivo entrar automaticamente no backup diário que o Odoo já mantém."""
+    if not caminho_arquivo or not caminho_arquivo.exists():
+        return
+    import base64
+    conteudo_b64 = base64.b64encode(caminho_arquivo.read_bytes()).decode()
+    models.execute_kw(
+        db, uid, api_key, "ir.attachment", "create",
+        [{
+            "name": caminho_arquivo.name,
+            "datas": conteudo_b64,
+            "res_model": res_model,
+            "res_id": res_id,
+        }],
+    )
+
+
 def gravar_pessoa(resultado: dict, partner_id: int):
     tipo = resultado["tipo_documento"]
     campos = resultado["campos_extraidos"] or {}
@@ -114,14 +142,16 @@ def gravar_pessoa(resultado: dict, partner_id: int):
         )
 
 
-def gravar_imovel(resultado: dict) -> bool:
+def gravar_imovel(resultado: dict):
+    """Retorna o id do x_imovel gravado, ou None se não havia número
+    identificador suficiente para prosseguir."""
     tipo = resultado["tipo_documento"]
     campos = resultado["campos_extraidos"] or {}
     config = CONFIG_IMOVEL_POR_TIPO[tipo]
 
     numero_chave = campos.get(config["campo_chave_json"])
     if not numero_chave:
-        return False
+        return None
 
     ids = models.execute_kw(
         db, uid, api_key, "x_imovel", "search",
@@ -137,10 +167,11 @@ def gravar_imovel(resultado: dict) -> bool:
 
     if ids:
         models.execute_kw(db, uid, api_key, "x_imovel", "write", [[ids[0]], valores])
+        return ids[0]
     else:
         valores["x_name"] = numero_chave
-        models.execute_kw(db, uid, api_key, "x_imovel", "create", [valores])
-    return True
+        novo_id = models.execute_kw(db, uid, api_key, "x_imovel", "create", [valores])
+        return novo_id
 
 
 def main():
@@ -148,10 +179,14 @@ def main():
     for arquivo_json in sorted(PROCESSADOS_DIR.glob("*.json")):
         resultado = json.loads(arquivo_json.read_text())
         tipo = resultado["tipo_documento"]
+        arquivo_original = encontrar_arquivo_original(arquivo_json)
 
         if tipo in CONFIG_IMOVEL_POR_TIPO:
-            if not gravar_imovel(resultado):
+            imovel_id = gravar_imovel(resultado)
+            if imovel_id is None:
                 arquivo_json.replace(SEM_CORRESPONDENCIA_DIR / arquivo_json.name)
+                continue
+            anexar_arquivo(arquivo_original, "x_imovel", imovel_id)
             continue
 
         campos = resultado.get("campos_extraidos") or {}
@@ -164,6 +199,7 @@ def main():
             continue
 
         gravar_pessoa(resultado, partner_id)
+        anexar_arquivo(arquivo_original, "res.partner", partner_id)
 
 
 if __name__ == "__main__":
