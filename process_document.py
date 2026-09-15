@@ -25,9 +25,13 @@ from datetime import date
 from pathlib import Path
 
 import anthropic
+from PIL import Image
+import io
 
 MODEL = "claude-sonnet-5"
 CONFIANCA_MINIMA = 70
+LADO_MAXIMO_IMAGEM = 1568  # recomendação da Anthropic para imagens de visão
+QUALIDADE_JPEG = 85
 
 INBOX_DIR = Path("./inbox")
 PROCESSADOS_DIR = Path("./processados")
@@ -93,9 +97,25 @@ def pdf_para_imagens(pdf_path: Path, saida_dir: Path) -> list[Path]:
     return sorted(saida_dir.glob(f"{pdf_path.stem}-*.png"))
 
 
+def preparar_imagem(imagem_path: Path) -> bytes:
+    """Redimensiona e recomprime a imagem antes de enviar -- fotos de
+    celular sincronizadas sem compressão estouram o limite de tamanho da
+    API. Sempre devolve JPEG, mesmo que a origem seja PNG."""
+    with Image.open(imagem_path) as img:
+        img = img.convert("RGB")
+        if max(img.size) > LADO_MAXIMO_IMAGEM:
+            escala = LADO_MAXIMO_IMAGEM / max(img.size)
+            novo_tamanho = (round(img.width * escala), round(img.height * escala))
+            img = img.resize(novo_tamanho, Image.LANCZOS)
+        buffer = io.BytesIO()
+        img.save(buffer, format="JPEG", quality=QUALIDADE_JPEG, optimize=True)
+        return buffer.getvalue()
+
+
 def chamar_claude_json(prompt: str, imagem_path: Path) -> dict:
-    imagem_b64 = base64.standard_b64encode(imagem_path.read_bytes()).decode()
-    media_type = "image/png" if imagem_path.suffix == ".png" else "image/jpeg"
+    imagem_bytes = preparar_imagem(imagem_path)
+    imagem_b64 = base64.standard_b64encode(imagem_bytes).decode()
+    media_type = "image/jpeg"
     resposta = client.messages.create(
         model=MODEL,
         max_tokens=1024,
