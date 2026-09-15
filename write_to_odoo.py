@@ -65,6 +65,14 @@ common = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/common")
 uid = common.authenticate(db, email, api_key, {})
 models = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/object")
 
+# Segunda camada de isolamento, além dos filtros de domínio explícitos:
+# toda chamada roda restrita a essa lista de empresas permitidas. Não é uma
+# garantia de segurança contra a própria conta (que é Administrador e tem
+# acesso às duas), mas barra escrita/leitura acidental fora de company_id=2
+# vinda de um bug de código, o que os filtros de domínio sozinhos não pegam
+# se alguém esquecer de escrevê-los numa chamada nova no futuro.
+CONTEXTO_EMPRESA = {"allowed_company_ids": [COMPANY_ID]}
+
 
 def buscar_partner_por_cpf(cpf: str):
     if not cpf:
@@ -72,6 +80,7 @@ def buscar_partner_por_cpf(cpf: str):
     ids = models.execute_kw(
         db, uid, api_key, "res.partner", "search",
         [[["vat", "=", cpf], ["company_id", "=", COMPANY_ID]]],
+        {"context": CONTEXTO_EMPRESA},
     )
     return ids[0] if ids else None
 
@@ -92,7 +101,8 @@ def gravar(resultado: dict, partner_id: int):
         if tipo_cpf_id:
             valores["l10n_latam_identification_type_id"] = tipo_cpf_id[0]
         models.execute_kw(
-            db, uid, api_key, "res.partner", "write", [[partner_id], valores]
+            db, uid, api_key, "res.partner", "write", [[partner_id], valores],
+            {"context": CONTEXTO_EMPRESA},
         )
         return
 
@@ -104,7 +114,8 @@ def gravar(resultado: dict, partner_id: int):
     }
     if valores:
         models.execute_kw(
-            db, uid, api_key, "res.partner", "write", [[partner_id], valores]
+            db, uid, api_key, "res.partner", "write", [[partner_id], valores],
+            {"context": CONTEXTO_EMPRESA},
         )
 
 
