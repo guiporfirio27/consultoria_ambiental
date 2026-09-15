@@ -2,27 +2,28 @@
 Grava no Odoo os dados extraídos dos documentos já processados
 (lê a pasta processados/, gerada por process_document.py).
 
-Diferente de process_document.py, este script NÃO usa o conector MCP
-"Odoo MPC GP Construtora" -- esse conector só existe dentro de uma sessão de
-chat do Claude. Rodando em GitHub Actions, a conexão é direto via XML-RPC,
-no mesmo padrão já usado nos outros módulos do projeto.
+Não usa o conector MCP "Odoo MPC GP Construtora" -- esse só existe dentro de
+uma sessão de chat do Claude. Conexão direta via XML-RPC.
+
+Duas rotas de gravação, dependendo do tipo de documento:
+
+  PESSOA (RG, CNH, CPF) -> res.partner
+    Continua exigindo achar o cliente certo (por partner_id já resolvido
+    a montante, ou por CPF já cadastrado). Sem cliente, vai para
+    sem_correspondencia/.
+
+  IMÓVEL (MAT-IMV, CAR, CADPRO) -> x_imovel
+    NÃO depende de achar o cliente primeiro. Busca ou cria o registro de
+    Imóvel pelo número do próprio documento (matrícula/CAR/protocolo CADPRO
+    já são identificadores únicos) -- essencial porque um mesmo cliente
+    pode ter mais de um imóvel em processos concorrentes, e o CPF sozinho
+    não diferencia qual imóvel um documento novo pertence.
+
+  COMP-RES continua fora do escopo deste script -- endereço já é tratado
+  pelo pipeline existente de OCR de comprovante de residência.
 
 Variáveis de ambiente esperadas:
-  ODOO_URL       -- ex.: https://gp-construcaoengenharia.odoo.com
-  ODOO_DB        -- nome do banco
-  ODOO_EMAIL     -- usuário técnico
-  ODOO_API_KEY   -- chave de API desse usuário
-
-LIMITAÇÃO CONHECIDA, documentada e não escondida:
-  Associar um documento ao cliente certo requer saber de antemão quem é o
-  cliente. Hoje isso só funciona em dois casos:
-    1. O arquivo .json já vem com "partner_id" preenchido (etapa anterior
-       -- anamnese ou casamento por telefone do WhatsApp -- já sabia quem
-       era o cliente e gravou isso no metadado).
-    2. O próprio documento é um CPF e o número extraído já bate com um
-       res.partner existente.
-  Fora desses dois casos, o documento cai em sem_correspondencia/ para
-  decisão manual -- nunca é gravado com um "melhor palpite" de cliente.
+  ODOO_URL, ODOO_DB, ODOO_EMAIL, ODOO_API_KEY
 """
 
 import json
@@ -34,32 +35,6 @@ PROCESSADOS_DIR = Path("./processados")
 SEM_CORRESPONDENCIA_DIR = Path("./sem_correspondencia")
 COMPANY_ID = 2  # GP Consultoria Ambiental
 
-CAMPO_POR_TIPO = {
-    "RG": {
-        "numero_rg": "x_cliente_rg_numero",
-        "orgao_emissor": "x_cliente_rg_orgao_emissor",
-    },
-    "CNH": {
-        "numero_rg": "x_cliente_rg_numero",
-        "orgao_emissor": "x_cliente_rg_orgao_emissor",
-    },
-    "MAT-IMV": {
-        "numero_matricula": "x_empreendimento_matricula_numero",
-        "cartorio": "x_empreendimento_matricula_cartorio",
-    },
-    "CAR": {
-        "numero_car": "x_empreendimento_car_numero",
-        "area_total_ha": "x_empreendimento_car_area_total_ha",
-    },
-    "CADPRO": {
-        "numero_protocolo": "x_empreendimento_cadpro_numero_protocolo",
-    },
-    # CPF grava no campo nativo `vat`, tratado à parte em gravar().
-    # COMP-RES não grava aqui -- endereço já é tratado pelo pipeline
-    # existente de OCR de comprovante de residência
-    # (endereco_requerente_completo), fora do escopo deste script.
-}
-
 url = os.environ["ODOO_URL"]
 db = os.environ["ODOO_DB"]
 email = os.environ["ODOO_EMAIL"]
@@ -69,13 +44,30 @@ common = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/common")
 uid = common.authenticate(db, email, api_key, {})
 models = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/object")
 
-# Segunda camada de isolamento, além dos filtros de domínio explícitos:
-# toda chamada roda restrita a essa lista de empresas permitidas. Não é uma
-# garantia de segurança contra a própria conta (que é Administrador e tem
-# acesso às duas), mas barra escrita/leitura acidental fora de company_id=2
-# vinda de um bug de código, o que os filtros de domínio sozinhos não pegam
-# se alguém esquecer de escrevê-los numa chamada nova no futuro.
 CONTEXTO_EMPRESA = {"allowed_company_ids": [COMPANY_ID]}
+
+CAMPO_POR_TIPO_PESSOA = {
+    "numero_rg": "x_cliente_rg_numero",
+    "orgao_emissor": "x_cliente_rg_orgao_emissor",
+}
+
+CONFIG_IMOVEL_POR_TIPO = {
+    "MAT-IMV": {
+        "campo_chave_json": "numero_matricula",
+        "campo_chave_odoo": "x_numero_matricula",
+        "outros_campos": {"cartorio": "x_cartorio"},
+    },
+    "CAR": {
+        "campo_chave_json": "numero_car",
+        "campo_chave_odoo": "x_numero_car",
+        "outros_campos": {"area_total_ha": "x_car_area_total_ha"},
+    },
+    "CADPRO": {
+        "campo_chave_json": "numero_protocolo",
+        "campo_chave_odoo": "x_numero_cadpro_protocolo",
+        "outros_campos": {},
+    },
+}
 
 
 def buscar_partner_por_cpf(cpf: str):
@@ -89,13 +81,10 @@ def buscar_partner_por_cpf(cpf: str):
     return ids[0] if ids else None
 
 
-def gravar(resultado: dict, partner_id: int):
+def gravar_pessoa(resultado: dict, partner_id: int):
     tipo = resultado["tipo_documento"]
     campos = resultado["campos_extraidos"] or {}
 
-    # CPF e CNH têm em comum o número de CPF, que vai para o campo nativo
-    # `vat` em vez de um campo x_ -- CNH, além disso, também traz RG, que
-    # segue pelo caminho normal do mapa logo abaixo (não retorna cedo).
     if tipo in ("CPF", "CNH"):
         numero_cpf = campos.get("numero_cpf")
         if numero_cpf:
@@ -113,10 +102,9 @@ def gravar(resultado: dict, partner_id: int):
         if tipo == "CPF":
             return
 
-    mapa = CAMPO_POR_TIPO.get(tipo, {})
     valores = {
         campo_odoo: campos[campo_json]
-        for campo_json, campo_odoo in mapa.items()
+        for campo_json, campo_odoo in CAMPO_POR_TIPO_PESSOA.items()
         if campos.get(campo_json) is not None
     }
     if valores:
@@ -126,22 +114,56 @@ def gravar(resultado: dict, partner_id: int):
         )
 
 
+def gravar_imovel(resultado: dict) -> bool:
+    tipo = resultado["tipo_documento"]
+    campos = resultado["campos_extraidos"] or {}
+    config = CONFIG_IMOVEL_POR_TIPO[tipo]
+
+    numero_chave = campos.get(config["campo_chave_json"])
+    if not numero_chave:
+        return False
+
+    ids = models.execute_kw(
+        db, uid, api_key, "x_imovel", "search",
+        [[[config["campo_chave_odoo"], "=", numero_chave]]],
+    )
+
+    valores = {
+        campo_odoo: campos[campo_json]
+        for campo_json, campo_odoo in config["outros_campos"].items()
+        if campos.get(campo_json) is not None
+    }
+    valores[config["campo_chave_odoo"]] = numero_chave
+
+    if ids:
+        models.execute_kw(db, uid, api_key, "x_imovel", "write", [[ids[0]], valores])
+    else:
+        valores["x_name"] = numero_chave
+        models.execute_kw(db, uid, api_key, "x_imovel", "create", [valores])
+    return True
+
+
 def main():
     SEM_CORRESPONDENCIA_DIR.mkdir(exist_ok=True)
     for arquivo_json in sorted(PROCESSADOS_DIR.glob("*.json")):
         resultado = json.loads(arquivo_json.read_text())
-        campos = resultado.get("campos_extraidos") or {}
+        tipo = resultado["tipo_documento"]
 
+        if tipo in CONFIG_IMOVEL_POR_TIPO:
+            if not gravar_imovel(resultado):
+                arquivo_json.replace(SEM_CORRESPONDENCIA_DIR / arquivo_json.name)
+            continue
+
+        campos = resultado.get("campos_extraidos") or {}
         partner_id = resultado.get("partner_id")
         if not partner_id:
             partner_id = buscar_partner_por_cpf(campos.get("numero_cpf"))
 
         if not partner_id:
-            destino = SEM_CORRESPONDENCIA_DIR / arquivo_json.name
-            arquivo_json.replace(destino)
+            arquivo_json.replace(SEM_CORRESPONDENCIA_DIR / arquivo_json.name)
             continue
 
-        gravar(resultado, partner_id)
+        gravar_pessoa(resultado, partner_id)
 
 
 if __name__ == "__main__":
