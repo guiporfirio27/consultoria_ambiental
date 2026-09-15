@@ -18,6 +18,7 @@ seguintes tipos, baseado exclusivamente no conteúdo visual da página (nunca no
 nome do arquivo, que você não recebe):
 
 - RG (carteira de identidade, frente ou verso)
+- CNH (Carteira Nacional de Habilitação — traz RG, CPF e filiação num único documento)
 - CPF (comprovante de inscrição no CPF)
 - MAT-IMV (matrícula de imóvel, documento de cartório de registro de imóveis)
 - CAR (recibo do Cadastro Ambiental Rural — SICAR)
@@ -58,6 +59,25 @@ Extraia os dados desta carteira de identidade (RG). Responda apenas com JSON:
 }
 Se um campo não estiver legível ou não aparecer nesta página (ex.: frente sem
 filiação), retorne null para ele — nunca invente ou complete um valor.
+```
+
+### CNH (Carteira Nacional de Habilitação)
+```
+Extraia os dados desta CNH. Ela costuma trazer RG, CPF e filiação juntos
+-- extraia todos os campos presentes. Responda apenas com JSON:
+{
+  "nome_completo": "string ou null",
+  "numero_registro_cnh": "string ou null",
+  "numero_rg": "string ou null (campo '4c DOC. IDENTIDADE')",
+  "orgao_emissor": "string ou null (órgão + UF do campo '4c')",
+  "numero_cpf": "string ou null (campo '4d CPF')",
+  "data_nascimento": "AAAA-MM-DD ou null",
+  "filiacao_mae": "string ou null",
+  "filiacao_pai": "string ou null",
+  "confianca": 0-100
+}
+Se um campo não estiver legível, retorne null -- nunca invente ou complete
+um valor.
 ```
 
 ### CPF
