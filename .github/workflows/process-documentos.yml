@@ -35,3 +35,15 @@ jobs:
           ODOO_EMAIL: ${{ secrets.ODOO_EMAIL }}
           ODOO_API_KEY: ${{ secrets.ODOO_API_KEY }}
         run: python write_to_odoo.py
+
+      - name: Publicar resultados como artefato (para conferência/teste)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: resultados-processamento
+          path: |
+            processados/
+            revisao_manual/
+            sem_correspondencia/
+          if-no-files-found: ignore
+          retention-days: 7
