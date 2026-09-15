@@ -38,6 +38,7 @@ seguintes tipos, baseado exclusivamente no conteúdo visual da página (nunca no
 nome do arquivo, que você não recebe):
 
 - RG (carteira de identidade, frente ou verso)
+- CNH (Carteira Nacional de Habilitação — traz RG, CPF e filiação num único documento)
 - CPF (comprovante de inscrição no CPF)
 - MAT-IMV (matrícula de imóvel, documento de cartório de registro de imóveis)
 - CAR (recibo do Cadastro Ambiental Rural — SICAR)
@@ -47,12 +48,15 @@ nome do arquivo, que você não recebe):
 
 Responda APENAS com um JSON válido, sem texto antes ou depois:
 
-{"tipo_documento": "RG|CPF|MAT-IMV|CAR|CADPRO|COMP-RES|NAO_IDENTIFICADO", "confianca": 0-100, "motivo": "string curta"}
+{"tipo_documento": "RG|CNH|CPF|MAT-IMV|CAR|CADPRO|COMP-RES|NAO_IDENTIFICADO", "confianca": 0-100, "motivo": "string curta"}
 """
 
 PROMPTS_EXTRACAO = {
     "RG": """Extraia os dados desta carteira de identidade (RG). Responda apenas com JSON:
 {"nome_completo": "string ou null", "numero_rg": "string ou null", "orgao_emissor": "string ou null", "data_nascimento": "AAAA-MM-DD ou null", "filiacao_mae": "string ou null", "filiacao_pai": "string ou null", "confianca": 0-100}
+Se um campo não estiver legível, retorne null — nunca invente um valor.""",
+    "CNH": """Extraia os dados desta CNH. Ela costuma trazer RG, CPF e filiação juntos -- extraia todos os campos presentes. Responda apenas com JSON:
+{"nome_completo": "string ou null", "numero_registro_cnh": "string ou null", "numero_rg": "string ou null", "orgao_emissor": "string ou null", "numero_cpf": "string ou null", "data_nascimento": "AAAA-MM-DD ou null", "filiacao_mae": "string ou null", "filiacao_pai": "string ou null", "confianca": 0-100}
 Se um campo não estiver legível, retorne null — nunca invente um valor.""",
     "CPF": """Extraia os dados deste comprovante de inscrição no CPF. Responda apenas com JSON:
 {"nome_completo": "string ou null", "numero_cpf": "string ou null", "confianca": 0-100}""",
