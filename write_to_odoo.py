@@ -39,6 +39,10 @@ CAMPO_POR_TIPO = {
         "numero_rg": "x_cliente_rg_numero",
         "orgao_emissor": "x_cliente_rg_orgao_emissor",
     },
+    "CNH": {
+        "numero_rg": "x_cliente_rg_numero",
+        "orgao_emissor": "x_cliente_rg_orgao_emissor",
+    },
     "MAT-IMV": {
         "numero_matricula": "x_empreendimento_matricula_numero",
         "cartorio": "x_empreendimento_matricula_cartorio",
@@ -89,22 +93,25 @@ def gravar(resultado: dict, partner_id: int):
     tipo = resultado["tipo_documento"]
     campos = resultado["campos_extraidos"] or {}
 
-    if tipo == "CPF":
+    # CPF e CNH têm em comum o número de CPF, que vai para o campo nativo
+    # `vat` em vez de um campo x_ -- CNH, além disso, também traz RG, que
+    # segue pelo caminho normal do mapa logo abaixo (não retorna cedo).
+    if tipo in ("CPF", "CNH"):
         numero_cpf = campos.get("numero_cpf")
-        if not numero_cpf:
+        if numero_cpf:
+            tipo_cpf_id = models.execute_kw(
+                db, uid, api_key, "l10n_latam.identification.type", "search",
+                [[["name", "=", "CPF"]]],
+            )
+            valores_cpf = {"vat": numero_cpf}
+            if tipo_cpf_id:
+                valores_cpf["l10n_latam_identification_type_id"] = tipo_cpf_id[0]
+            models.execute_kw(
+                db, uid, api_key, "res.partner", "write", [[partner_id], valores_cpf],
+                {"context": CONTEXTO_EMPRESA},
+            )
+        if tipo == "CPF":
             return
-        tipo_cpf_id = models.execute_kw(
-            db, uid, api_key, "l10n_latam.identification.type", "search",
-            [[["name", "=", "CPF"]]],
-        )
-        valores = {"vat": numero_cpf}
-        if tipo_cpf_id:
-            valores["l10n_latam_identification_type_id"] = tipo_cpf_id[0]
-        models.execute_kw(
-            db, uid, api_key, "res.partner", "write", [[partner_id], valores],
-            {"context": CONTEXTO_EMPRESA},
-        )
-        return
 
     mapa = CAMPO_POR_TIPO.get(tipo, {})
     valores = {
