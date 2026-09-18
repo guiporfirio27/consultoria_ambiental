@@ -39,6 +39,8 @@ jobs:
           ODOO_DB: ${{ secrets.ODOO_DB }}
           ODOO_EMAIL: ${{ secrets.ODOO_EMAIL }}
           ODOO_API_KEY: ${{ secrets.ODOO_API_KEY }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python write_to_odoo.py
 
       - name: Publicar resultados como artefato (para conferência/teste)
