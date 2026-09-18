@@ -36,8 +36,14 @@ ODOO_EMAIL = os.environ["ODOO_EMAIL"]
 ODOO_API_KEY = os.environ["ODOO_API_KEY"]
 COMPANY_ID = 2  # GP Consultoria Ambiental -- nunca mudar sem revisar o resto do pipeline
 
-TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
-TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+# TELEGRAM_TOKEN/TELEGRAM_CHAT_ID são lidos sob demanda em
+# _notificar_telegram_pendente(), não aqui no nível do módulo -- este
+# arquivo é importado por write_to_odoo.py, cujo passo no workflow só
+# recebe as variáveis ODOO_*. Ler com os.environ[...] aqui quebraria o
+# import inteiro (e, com ele, toda a gravação de pessoa no Odoo) se esse
+# passo alguma vez ficar sem os secrets de Telegram -- já aconteceu uma
+# vez. Sem o token, a notificação só é pulada, igual ao padrão já usado em
+# process_document.py.
 
 
 def _conectar_odoo():
@@ -134,6 +140,13 @@ def buscar_ou_criar_pessoa(dados_extraidos: dict, caminho_arquivo_original: str)
 
 
 def _notificar_telegram_pendente(dados_extraidos: dict, partner_id: int):
+    token = os.environ.get("TELEGRAM_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        # Sem os secrets de Telegram disponíveis neste passo, só pula a
+        # notificação -- o cadastro pendente já foi criado no Odoo, isso
+        # não pode ser bloqueado por uma notificação opcional.
+        return
     link = f"{ODOO_URL}/odoo/contacts/{partner_id}"
     texto = (
         "🟡 *Novo cadastro pendente de confirmação*\n\n"
@@ -147,7 +160,7 @@ def _notificar_telegram_pendente(dados_extraidos: dict, partner_id: int):
         f"Confirme aqui: {link}"
     )
     requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-        data={"chat_id": TELEGRAM_CHAT_ID, "text": texto, "parse_mode": "Markdown"},
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        data={"chat_id": chat_id, "text": texto, "parse_mode": "Markdown"},
         timeout=15,
     )
