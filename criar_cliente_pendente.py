@@ -18,12 +18,11 @@ agora ele:
      pessoa (Cliente / Proprietário / Empreendedor / Terceiro) --
      o pipeline NUNCA decide isso sozinho, só cadastra os dados.
 
-Integração: chame `buscar_ou_criar_pessoa(...)` no lugar do trecho de
-write_to_odoo.py que hoje, ao não achar correspondência, grava o JSON
-em sem_correspondencia/ e não escreve nada no Odoo. Ajuste os nomes de
-chave do dicionário `dados_extraidos` conforme o schema real que o seu
-process_document.py já produz (aqui assumo nome/cpf/rg_numero/
-rg_orgao_emissor/tipo_documento com base no manual do pipeline).
+Integração: chamado a partir de write_to_odoo.py, no trecho que hoje, ao não
+achar correspondência de CPF, gravava o JSON em sem_correspondencia/ sem
+escrever nada no Odoo. Nomes de chave já ajustados para o schema real
+produzido por process_document.py (numero_cpf/nome_completo/numero_rg/
+orgao_emissor/tipo_documento).
 """
 
 import os
@@ -73,12 +72,13 @@ def _id_tipo_identificacao_cpf(models, uid):
 def buscar_ou_criar_pessoa(dados_extraidos: dict, caminho_arquivo_original: str) -> dict:
     """
     dados_extraidos deve conter pelo menos:
-        - 'cpf'                (string, só dígitos ou formatado -- ajuste
-                                 se seu process_document.py já normaliza)
-        - 'nome'
+        - 'numero_cpf'          (string -- chave real produzida por
+                                 process_document.py, ver
+                                 prompts-classificacao-extracao-documentos.md)
+        - 'nome_completo'
         - 'tipo_documento'      ('RG' | 'CNH' | 'CPF')
-        - 'rg_numero'           (opcional, RG/CNH)
-        - 'rg_orgao_emissor'    (opcional, RG/CNH)
+        - 'numero_rg'           (opcional, RG/CNH)
+        - 'orgao_emissor'       (opcional, RG/CNH)
 
     Retorna um dict {'partner_id': int, 'criado': bool} para o
     write_to_odoo.py decidir o que gravar no JSON de saída e em qual
@@ -87,7 +87,7 @@ def buscar_ou_criar_pessoa(dados_extraidos: dict, caminho_arquivo_original: str)
     """
     uid, models = _conectar_odoo()
 
-    cpf = dados_extraidos["cpf"]
+    cpf = dados_extraidos["numero_cpf"]
     partner_ids = _executar(
         models, uid, "res.partner", "search",
         [["company_id", "=", COMPANY_ID], ["vat", "=", cpf]],
@@ -98,16 +98,16 @@ def buscar_ou_criar_pessoa(dados_extraidos: dict, caminho_arquivo_original: str)
         criado = False
     else:
         valores = {
-            "name": dados_extraidos["nome"],
+            "name": dados_extraidos["nome_completo"],
             "vat": cpf,
             "l10n_latam_identification_type_id": _id_tipo_identificacao_cpf(models, uid),
             "company_id": COMPANY_ID,
             "x_status_cadastro": "pendente_confirmacao",
         }
-        if dados_extraidos.get("rg_numero"):
-            valores["x_cliente_rg_numero"] = dados_extraidos["rg_numero"]
-        if dados_extraidos.get("rg_orgao_emissor"):
-            valores["x_cliente_rg_orgao_emissor"] = dados_extraidos["rg_orgao_emissor"]
+        if dados_extraidos.get("numero_rg"):
+            valores["x_cliente_rg_numero"] = dados_extraidos["numero_rg"]
+        if dados_extraidos.get("orgao_emissor"):
+            valores["x_cliente_rg_orgao_emissor"] = dados_extraidos["orgao_emissor"]
 
         partner_id = _executar(models, uid, "res.partner", "create", valores)
         criado = True
@@ -137,8 +137,8 @@ def _notificar_telegram_pendente(dados_extraidos: dict, partner_id: int):
     link = f"{ODOO_URL}/odoo/contacts/{partner_id}"
     texto = (
         "🟡 *Novo cadastro pendente de confirmação*\n\n"
-        f"Nome: {dados_extraidos['nome']}\n"
-        f"CPF: {dados_extraidos['cpf']}\n"
+        f"Nome: {dados_extraidos['nome_completo']}\n"
+        f"CPF: {dados_extraidos['numero_cpf']}\n"
         f"Origem: {dados_extraidos.get('tipo_documento', '?')}\n\n"
         "Não havia cliente cadastrado com esse CPF -- o registro foi "
         "criado automaticamente, mas ninguém confirmou ainda se essa "
