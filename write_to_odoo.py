@@ -8,9 +8,13 @@ uma sessão de chat do Claude. Conexão direta via XML-RPC.
 Duas rotas de gravação, dependendo do tipo de documento:
 
   PESSOA (RG, CNH, CPF) -> res.partner
-    Continua exigindo achar o cliente certo (por partner_id já resolvido
-    a montante, ou por CPF já cadastrado). Sem cliente, vai para
-    sem_correspondencia/.
+    Busca o cliente por partner_id já resolvido a montante, ou por CPF já
+    cadastrado. Se o CPF não corresponde a ninguém, delega para
+    criar_cliente_pendente.py: cria o contato mesmo assim -- nome + CPF +
+    x_status_cadastro='pendente_confirmacao' -- sem assumir que a pessoa é
+    "Cliente" (pode ser Proprietário, Empreendedor ou Terceiro; confirmação
+    de papel continua manual, só que depois do cadastro já existir). Esse
+    módulo também anexa o documento e notifica o Telegram nesse caso.
 
   IMÓVEL (MAT-IMV, CAR, CADPRO) -> x_imovel
     NÃO depende de achar o cliente primeiro. Busca ou cria o registro de
@@ -30,6 +34,8 @@ import json
 import os
 import xmlrpc.client
 from pathlib import Path
+
+from criar_cliente_pendente import buscar_ou_criar_pessoa
 
 PROCESSADOS_DIR = Path("./processados")
 SEM_CORRESPONDENCIA_DIR = Path("./sem_correspondencia")
@@ -194,12 +200,25 @@ def main():
         if not partner_id:
             partner_id = buscar_partner_por_cpf(campos.get("numero_cpf"))
 
-        if not partner_id:
+        if partner_id:
+            gravar_pessoa(resultado, partner_id)
+            anexar_arquivo(arquivo_original, "res.partner", partner_id)
+            continue
+
+        numero_cpf = campos.get("numero_cpf")
+        if not numero_cpf:
+            # Sem CPF extraído não há chave confiável para criar (nem
+            # para reencontrar depois) -- mantém o comportamento antigo.
             arquivo_json.replace(SEM_CORRESPONDENCIA_DIR / arquivo_json.name)
             continue
 
-        gravar_pessoa(resultado, partner_id)
-        anexar_arquivo(arquivo_original, "res.partner", partner_id)
+        # CPF não corresponde a ninguém: cria o contato mesmo assim, sem
+        # assumir "Cliente" (pode ser Proprietário/Empreendedor/Terceiro).
+        # buscar_ou_criar_pessoa já cuida de criar com
+        # x_status_cadastro='pendente_confirmacao', anexar o documento e
+        # notificar o Telegram -- não repetir esses passos aqui.
+        dados_extraidos = {**campos, "tipo_documento": tipo}
+        buscar_ou_criar_pessoa(dados_extraidos, str(arquivo_original))
 
 
 if __name__ == "__main__":
