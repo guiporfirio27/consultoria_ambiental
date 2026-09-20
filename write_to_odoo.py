@@ -274,8 +274,18 @@ def tratar_automatico(resultado: dict, caminho_arquivo: str) -> str | None:
                     f"({CONFIG_IMOVEL[tipo]['campo_chave_json']}). "
                     "Preencha o número ou escolha o imóvel.")
         if caminho_arquivo:
-            anexar_arquivo(models, uid, caminho_arquivo, "x_imovel", imovel_id)
+            # O titular é vinculado ANTES de anexar: assim a ficha do app
+            # Documentos já nasce com o contato certo como dono, e o arquivo
+            # aparece também no botão "Documents" dessa pessoa.
             vincular_titular(resultado, imovel_id, caminho_arquivo)
+
+            dono = _executar(models, uid, "x_imovel", "read",
+                             [imovel_id], ["x_titular_documento_id"])
+            titular = dono[0].get("x_titular_documento_id") if dono else False
+            titular_id = titular[0] if titular else None
+
+            anexar_arquivo(models, uid, caminho_arquivo, "x_imovel", imovel_id,
+                           partner_id=titular_id)
         return None
 
     # ------------------------------------------------------------ PESSOA
@@ -285,7 +295,8 @@ def tratar_automatico(resultado: dict, caminho_arquivo: str) -> str | None:
         if partner_id:
             gravar_pessoa(resultado, partner_id)
             if caminho_arquivo:
-                anexar_arquivo(models, uid, caminho_arquivo, "res.partner", partner_id)
+                anexar_arquivo(models, uid, caminho_arquivo, "res.partner", partner_id,
+                               partner_id=partner_id)
             return None
 
         if not campos.get("numero_cpf"):
