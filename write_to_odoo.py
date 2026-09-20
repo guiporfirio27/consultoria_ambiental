@@ -138,8 +138,24 @@ def gravar_pessoa(resultado: dict, partner_id: int):
             valores[campo_odoo] = campos[chave_json]
 
     if valores:
+        # Gravar `vat` vira is_company para True nesta base, inclusive em write
+        # (ver comentário em criar_cliente_pendente.py). Guardamos o valor antes
+        # e restauramos depois, para não transformar um cliente pessoa física
+        # em Empresa só porque o CPF foi preenchido.
+        antes = _executar(models, uid, "res.partner", "read",
+                          [partner_id], ["is_company"])
+        era_empresa = antes[0]["is_company"] if antes else False
+
         _executar(models, uid, "res.partner", "write", [partner_id], valores)
         print(f"[ok] res.partner {partner_id} atualizado: {list(valores)}")
+
+        if "vat" in valores:
+            depois = _executar(models, uid, "res.partner", "read",
+                               [partner_id], ["is_company"])
+            if depois and depois[0]["is_company"] != era_empresa:
+                _executar(models, uid, "res.partner", "write",
+                          [partner_id], {"is_company": era_empresa})
+                print(f"[ok] is_company restaurado para {era_empresa}")
 
 
 def vincular_titular(resultado: dict, imovel_id: int, caminho_arquivo: str):
