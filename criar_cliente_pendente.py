@@ -79,10 +79,72 @@ def _id_tipo_identificacao(models, uid, documento: str) -> int | None:
     return ids[0] if ids else None
 
 
-def anexar_arquivo(models, uid, caminho_arquivo: str, res_model: str, res_id: int):
-    """Anexa o documento original no registro certo (ir.attachment) -- é isso
-    que vira o banco de documentos navegável e o que faz o arquivo entrar no
-    backup diário que o Odoo já mantém.
+PASTAS_POR_MODELO = {
+    "res.partner": "gp.documentos.pasta_pessoas",
+    "x_imovel": "gp.documentos.pasta_imoveis",
+    "x_documento_pendente": "gp.documentos.pasta_pendentes",
+}
+
+
+def _pasta_documentos(models, uid, res_model: str):
+    """Id da pasta do app Documentos para este tipo de registro.
+
+    Guardado em ir.config_parameter, não fixado no código: assim você pode
+    renomear ou remanejar as pastas no Odoo sem precisar de um commit."""
+    chave = PASTAS_POR_MODELO.get(res_model)
+    if not chave:
+        return None
+    registros = _executar(
+        models, uid, "ir.config_parameter", "search_read",
+        [["key", "=", chave]], fields=["value"], limit=1)
+    if not registros:
+        return None
+    valor = (registros[0].get("value") or "").strip()
+    return int(valor) if valor.isdigit() else None
+
+
+def _fichar_no_app_documentos(models, uid, anexo_id: int, nome: str,
+                              res_model: str, res_id: int, partner_id=None):
+    """Cria o registro do app Documentos apontando para o anexo já existente.
+
+    Anexo e app Documentos são coisas diferentes no Odoo: o `ir.attachment`
+    aparece na área de anexos do registro, mas o botão "Documents" do contato
+    e a árvore de pastas leem `documents.document`. Gravar só o anexo deixava
+    o contador do botão em zero -- o arquivo existia e parecia não existir.
+
+    Confirmado por teste direto: criar o `documents.document` apontando para um
+    anexo já vinculado a um contato NÃO altera o `res_model`/`res_id` desse
+    anexo, então o vínculo com o contato ou imóvel continua intacto."""
+    pasta_id = _pasta_documentos(models, uid, res_model)
+    if not pasta_id:
+        print(f"[aviso] pasta do app Documentos não configurada para {res_model}")
+        return None
+
+    ja_existe = _executar(
+        models, uid, "documents.document", "search",
+        [["attachment_id", "=", anexo_id]], limit=1)
+
+    valores = {"folder_id": pasta_id}
+    if partner_id:
+        valores["partner_id"] = partner_id
+
+    if ja_existe:
+        _executar(models, uid, "documents.document", "write", ja_existe, valores)
+        print(f"[ok] ficha do app Documentos {ja_existe[0]} movida para a pasta {pasta_id}")
+        return ja_existe[0]
+
+    valores["name"] = nome
+    valores["attachment_id"] = anexo_id
+    ficha_id = _executar(models, uid, "documents.document", "create", valores)
+    print(f"[ok] ficha {ficha_id} criada no app Documentos (pasta {pasta_id})")
+    return ficha_id
+
+
+def anexar_arquivo(models, uid, caminho_arquivo: str, res_model: str, res_id: int,
+                   partner_id=None):
+    """Anexa o documento original no registro certo (ir.attachment) E o ficha
+    no app Documentos -- é isso que vira o banco de documentos navegável e o
+    que faz o arquivo entrar no backup diário que o Odoo já mantém.
 
     CAMPO CORRETO NESTA BASE: db_datas. O campo 'datas' não existe aqui e é
     ignorado silenciosamente no create(), produzindo anexo de 0 bytes (D1)."""
@@ -93,6 +155,7 @@ def anexar_arquivo(models, uid, caminho_arquivo: str, res_model: str, res_id: in
     with open(caminho_arquivo, "rb") as f:
         conteudo = f.read()
     checksum = hashlib.sha1(conteudo).hexdigest()
+    nome_arquivo = os.path.basename(caminho_arquivo)
 
     # D6: não duplicar o mesmo arquivo no mesmo registro a cada reprocessamento.
     existentes = _executar(
@@ -105,18 +168,25 @@ def anexar_arquivo(models, uid, caminho_arquivo: str, res_model: str, res_id: in
     )
     if existentes:
         print(f"[ok] anexo já existe em {res_model}/{res_id} (checksum {checksum[:8]})")
+        # Mesmo já existindo, garante a ficha no app Documentos -- um anexo de
+        # antes desta mudança não tem ficha nenhuma.
+        _fichar_no_app_documentos(models, uid, existentes[0], nome_arquivo,
+                                  res_model, res_id, partner_id)
         return existentes[0]
 
     anexo_id = _executar(
         models, uid, "ir.attachment", "create",
         {
-            "name": os.path.basename(caminho_arquivo),
+            "name": nome_arquivo,
             "db_datas": base64.b64encode(conteudo).decode(),
             "res_model": res_model,
             "res_id": res_id,
         },
     )
     print(f"[ok] anexo criado id={anexo_id} em {res_model}/{res_id} ({len(conteudo)} bytes)")
+
+    _fichar_no_app_documentos(models, uid, anexo_id, nome_arquivo,
+                              res_model, res_id, partner_id)
     return anexo_id
 
 
@@ -177,7 +247,8 @@ def buscar_ou_criar_pessoa(
                   [partner_id], {"is_company": eh_empresa})
         criado = True
 
-    anexar_arquivo(models, uid, caminho_arquivo_original, "res.partner", partner_id)
+    anexar_arquivo(models, uid, caminho_arquivo_original, "res.partner", partner_id,
+                   partner_id=partner_id)
 
     if criado:
         _notificar_telegram_pendente(dados_extraidos, partner_id, origem)
