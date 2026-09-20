@@ -155,7 +155,6 @@ def buscar_ou_criar_pessoa(
             "vat": documento,
             "company_id": COMPANY_ID,
             "x_status_cadastro": "pendente_confirmacao",
-            "is_company": len(so_digitos(documento)) == 14,
         }
         tipo_id = _id_tipo_identificacao(models, uid, documento)
         if tipo_id:
@@ -166,6 +165,16 @@ def buscar_ou_criar_pessoa(
             valores["x_cliente_rg_orgao_emissor"] = dados_extraidos["orgao_emissor"]
 
         partner_id = _executar(models, uid, "res.partner", "create", valores)
+
+        # Nesta base, gravar `vat` no mesmo create() força is_company=True --
+        # mesmo passando is_company=False junto, o valor é ignorado. Resultado:
+        # toda pessoa física nascia marcada como Empresa, em silêncio.
+        # Confirmado por teste direto: um write SEPARADO, depois do create,
+        # é o único jeito de o valor pegar. Escrever `vat` num write também
+        # dispara a mesma virada, então a correção vem sempre por último.
+        eh_empresa = len(so_digitos(documento)) == 14
+        _executar(models, uid, "res.partner", "write",
+                  [partner_id], {"is_company": eh_empresa})
         criado = True
 
     anexar_arquivo(models, uid, caminho_arquivo_original, "res.partner", partner_id)
