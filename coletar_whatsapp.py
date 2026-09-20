@@ -33,7 +33,6 @@ Variaveis de ambiente:
 
 import base64
 import json
-import os
 import re
 from pathlib import Path
 
