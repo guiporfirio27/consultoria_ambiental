@@ -89,6 +89,75 @@ CONFIG_IMOVEL = {
 
 TIPOS_PESSOA = ("RG", "CNH", "CPF")
 
+# ---------------------------------------------------------------------------
+# Política de gravação: o pipeline preenche, não corrige
+# ---------------------------------------------------------------------------
+# Regra, para qualquer campo:
+#   campo vazio          -> preenche
+#   valor igual          -> não faz nada
+#   valor diferente      -> NÃO sobrescreve; vira pendência para você decidir
+#
+# A exceção são os campos "atualizáveis" abaixo, em que um documento mais novo
+# legitimamente supera o anterior (a área do CAR muda quando sai recibo novo).
+# Mesmo nesses, o valor antigo é registrado na pendência, nunca some calado.
+#
+# Por que isso importa: antes, todo reprocessamento gravava por cima. Se você
+# corrigisse à mão um órgão emissor que a IA leu errado, a próxima foto do
+# mesmo documento desfazia a sua correção sem avisar. Extração de OCR é
+# palpite com confiança medida; o que você digitou é fato. Palpite não
+# sobrescreve fato.
+CAMPOS_ATUALIZAVEIS = {
+    "x_area_ha",
+    "x_car_area_total_ha",
+    "x_car_data_emissao",
+}
+
+
+def aplicar_valores(modelo: str, registro_id: int, valores: dict) -> tuple[dict, list]:
+    """Aplica só o que é seguro aplicar. Devolve (aplicados, divergências)."""
+    if not valores:
+        return {}, []
+
+    atuais = _executar(models, uid, modelo, "read",
+                       [registro_id], list(valores.keys()))
+    atual = atuais[0] if atuais else {}
+
+    aplicar = {}
+    divergencias = []
+
+    for campo, novo in valores.items():
+        antigo = atual.get(campo)
+
+        # many2one volta como [id, nome]; comparar pelo id
+        if isinstance(antigo, list) and antigo:
+            antigo = antigo[0]
+
+        vazio = antigo in (False, None, "", 0, 0.0)
+        if vazio:
+            aplicar[campo] = novo
+            continue
+
+        if str(antigo).strip() == str(novo).strip():
+            continue
+
+        if campo in CAMPOS_ATUALIZAVEIS:
+            aplicar[campo] = novo
+            divergencias.append(
+                f"{campo}: atualizado de '{antigo}' para '{novo}'")
+        else:
+            divergencias.append(
+                f"{campo}: documento diz '{novo}', cadastro tem '{antigo}' "
+                "-- mantido o do cadastro")
+
+    if aplicar:
+        _executar(models, uid, modelo, "write", [registro_id], aplicar)
+        print(f"[ok] {modelo} {registro_id}: preenchido {list(aplicar)}")
+    if divergencias:
+        for d in divergencias:
+            print(f"[divergência] {modelo} {registro_id}: {d}")
+
+    return aplicar, divergencias
+
 uid, models = _conectar_odoo()
 ODOO_URL = os.environ["ODOO_URL"]
 
@@ -120,42 +189,45 @@ def so_digitos(valor: str) -> str:
     return re.sub(r"\D", "", valor or "")
 
 
-def gravar_pessoa(resultado: dict, partner_id: int):
+def gravar_pessoa(resultado: dict, partner_id: int) -> list:
+    """Devolve a lista de divergências encontradas (vazia se tudo certo)."""
     campos = resultado.get("campos_extraidos") or {}
     valores = {}
 
     if campos.get("numero_cpf"):
-        tipo_ids = _executar(
-            models, uid, "l10n_latam.identification.type", "search",
-            [["name", "=", "CPF"]],
-        )
         valores["vat"] = campos["numero_cpf"]
-        if tipo_ids:
-            valores["l10n_latam_identification_type_id"] = tipo_ids[0]
-
     for chave_json, campo_odoo in CAMPOS_PESSOA.items():
         if campos.get(chave_json):
             valores[campo_odoo] = campos[chave_json]
 
-    if valores:
-        # Gravar `vat` vira is_company para True nesta base, inclusive em write
-        # (ver comentário em criar_cliente_pendente.py). Guardamos o valor antes
-        # e restauramos depois, para não transformar um cliente pessoa física
-        # em Empresa só porque o CPF foi preenchido.
-        antes = _executar(models, uid, "res.partner", "read",
-                          [partner_id], ["is_company"])
-        era_empresa = antes[0]["is_company"] if antes else False
+    if not valores:
+        return []
 
-        _executar(models, uid, "res.partner", "write", [partner_id], valores)
-        print(f"[ok] res.partner {partner_id} atualizado: {list(valores)}")
+    era_empresa = _executar(models, uid, "res.partner", "read",
+                            [partner_id], ["is_company"])
+    era_empresa = era_empresa[0]["is_company"] if era_empresa else False
 
-        if "vat" in valores:
-            depois = _executar(models, uid, "res.partner", "read",
-                               [partner_id], ["is_company"])
-            if depois and depois[0]["is_company"] != era_empresa:
-                _executar(models, uid, "res.partner", "write",
-                          [partner_id], {"is_company": era_empresa})
-                print(f"[ok] is_company restaurado para {era_empresa}")
+    aplicados, divergencias = aplicar_valores("res.partner", partner_id, valores)
+
+    # O tipo de identificação acompanha o CPF, e só quando o CPF foi de fato
+    # gravado agora.
+    if "vat" in aplicados:
+        tipo_ids = _executar(models, uid, "l10n_latam.identification.type",
+                             "search", [["name", "=", "CPF"]])
+        if tipo_ids:
+            _executar(models, uid, "res.partner", "write", [partner_id],
+                      {"l10n_latam_identification_type_id": tipo_ids[0]})
+
+    # Gravar `vat` vira is_company para True nesta base (ver
+    # criar_cliente_pendente.py). Restaura o valor anterior.
+    if "vat" in aplicados:
+        depois = _executar(models, uid, "res.partner", "read",
+                           [partner_id], ["is_company"])
+        if depois and depois[0]["is_company"] != era_empresa:
+            _executar(models, uid, "res.partner", "write",
+                      [partner_id], {"is_company": era_empresa})
+
+    return divergencias
 
 
 def vincular_titular(resultado: dict, imovel_id: int, caminho_arquivo: str):
@@ -222,8 +294,8 @@ def gravar_imovel(resultado: dict) -> int | None:
         [[config["campo_chave_odoo"], "=", numero_chave]])
 
     if ids:
-        _executar(models, uid, "x_imovel", "write", [ids[0]], valores)
-        print(f"[ok] x_imovel {ids[0]} atualizado ({tipo} {numero_chave})")
+        _, divergencias = aplicar_valores("x_imovel", ids[0], valores)
+        resultado["_divergencias"] = divergencias
         return ids[0]
 
     valores["x_name"] = numero_chave
@@ -286,6 +358,13 @@ def tratar_automatico(resultado: dict, caminho_arquivo: str) -> str | None:
 
             anexar_arquivo(models, uid, caminho_arquivo, "x_imovel", imovel_id,
                            partner_id=titular_id)
+
+        # Divergência não bloqueia a gravação do que deu para gravar -- ela
+        # só chama você para decidir o que ficou em desacordo.
+        divergencias = resultado.pop("_divergencias", [])
+        if divergencias:
+            return ("Dados do documento divergem do cadastro do imóvel: "
+                    + " | ".join(divergencias))
         return None
 
     # ------------------------------------------------------------ PESSOA
@@ -293,10 +372,13 @@ def tratar_automatico(resultado: dict, caminho_arquivo: str) -> str | None:
         partner_id = resolver_pessoa(resultado)
 
         if partner_id:
-            gravar_pessoa(resultado, partner_id)
+            divergencias = gravar_pessoa(resultado, partner_id)
             if caminho_arquivo:
                 anexar_arquivo(models, uid, caminho_arquivo, "res.partner", partner_id,
                                partner_id=partner_id)
+            if divergencias:
+                return ("Dados do documento divergem do cadastro da pessoa: "
+                        + " | ".join(divergencias))
             return None
 
         if not campos.get("numero_cpf"):
