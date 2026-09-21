@@ -246,11 +246,113 @@ def chave_identificadora(campos: dict) -> str:
     return campos.get("nome_completo") or campos.get("titular") or ""
 
 
-def nome_final(identificador: str, checksum: str, extensao: str) -> str:
-    """Inclui hash curto do conteúdo: dois arquivos diferentes do mesmo
-    titular, mesmo tipo e mesmo dia não se sobrescrevem mais (D5)."""
+def nome_final(tipo: str, identificador: str, checksum: str, extensao: str) -> str:
+    """Nome legível na hora de anexar no SGA/SIGARH/SICAR.
+
+    O TIPO vem primeiro de propósito: na tela de anexos do órgão, cada campo
+    pede um documento específico, e o que você lê é o nome do arquivo. A versão
+    anterior omitia o tipo (efeito colateral de aceitar PDF multipágina, em que
+    um arquivo podia conter dois documentos) e obrigava a abrir um por um.
+    Com a divisão por tipo, cada arquivo tem exatamente um tipo e o nome pode
+    voltar a dizer qual é.
+
+    O hash do conteúdo continua no fim: dois documentos do mesmo titular, mesmo
+    tipo e mesmo dia (frente e verso fotografados separados, por exemplo) não
+    se sobrescrevem."""
     limpo = re.sub(r"\W", "", identificador or "")[:20] or "SEM-DOC"
-    return f"{limpo}_{date.today().isoformat()}_{checksum[:8]}{extensao}"
+    return f"{tipo}_{limpo}_{date.today().isoformat()}_{checksum[:6]}{extensao}"
+
+
+def extrair_paginas(origem: Path, paginas: list[int], destino: Path) -> bool:
+    """Gera um PDF novo contendo só as páginas indicadas (1-based).
+
+    Usa pdfseparate + pdfunite, que já vêm no poppler-utils instalado pelo
+    workflow -- sem dependência nova."""
+    TMP_DIR.mkdir(parents=True, exist_ok=True)
+    avulsas = []
+    for numero in paginas:
+        avulsa = TMP_DIR / f"corte_{numero}.pdf"
+        resultado = subprocess.run(
+            ["pdfseparate", "-f", str(numero), "-l", str(numero),
+             str(origem), str(avulsa)],
+            capture_output=True)
+        if resultado.returncode != 0 or not avulsa.exists():
+            print(f"  [aviso] falha ao separar a página {numero}")
+            return False
+        avulsas.append(avulsa)
+
+    if not avulsas:
+        return False
+
+    if len(avulsas) == 1:
+        shutil.copy(str(avulsas[0]), str(destino))
+    else:
+        resultado = subprocess.run(
+            ["pdfunite"] + [str(p) for p in avulsas] + [str(destino)],
+            capture_output=True)
+        if resultado.returncode != 0 or not destino.exists():
+            print("  [aviso] falha ao juntar as páginas separadas")
+            return False
+
+    for avulsa in avulsas:
+        avulsa.unlink(missing_ok=True)
+    return True
+
+
+def arquivar_por_tipo(caminho: Path, resultados: list[dict]) -> None:
+    """Divide o arquivo de entrada em UM ARQUIVO POR TIPO de documento e grava
+    o caminho de cada um dentro do resultado correspondente.
+
+    Esta é a parte que resolve dois problemas de uma vez:
+      1. o nome volta a dizer que documento é aquele;
+      2. você deixa de precisar dividir o PDF à mão antes de subir no SGA --
+         um scan com RG, CPF e matrícula juntos já sai separado.
+
+    Quando não dá para dividir (imagem solta, PDF de um tipo só, ou falha do
+    poppler), o arquivo inteiro é usado para todos os resultados -- o pipeline
+    nunca fica sem arquivo por causa disso."""
+    ARQUIVOS_DIR.mkdir(exist_ok=True)
+    eh_pdf = caminho.suffix.lower() == ".pdf"
+    tipos_distintos = {r["tipo_documento"] for r in resultados}
+    total_paginas = sum(len(r.get("paginas") or []) for r in resultados)
+    paginas_ignoradas = len((resultados[0].get("paginas_ignoradas") or [])) if resultados else 0
+
+    # Vale dividir só quando há mais de um tipo, ou quando sobraram páginas que
+    # não entraram em nenhum tipo (aí o recorte limpa o arquivo).
+    dividir = eh_pdf and (len(tipos_distintos) > 1 or paginas_ignoradas > 0)
+
+    arquivos_gerados = []
+    for resultado in resultados:
+        tipo = resultado["tipo_documento"]
+        identificador = chave_identificadora(resultado.get("campos_extraidos") or {})
+        destino = ARQUIVOS_DIR / nome_final(
+            tipo, identificador, resultado["checksum_sha1"], caminho.suffix)
+
+        if destino.exists():
+            destino.unlink()
+
+        paginas = resultado.get("paginas") or []
+        if dividir and paginas and extrair_paginas(caminho, paginas, destino):
+            resultado["arquivo_processado"] = str(destino)
+            resultado["dividido"] = True
+            arquivos_gerados.append(destino)
+            print(f"  -> {destino.name} (páginas {paginas})")
+        else:
+            # Sem divisão: uma cópia do arquivo inteiro com o nome do tipo.
+            shutil.copy(str(caminho), str(destino))
+            resultado["arquivo_processado"] = str(destino)
+            resultado["dividido"] = False
+            arquivos_gerados.append(destino)
+            print(f"  -> {destino.name}")
+
+    # O original sai da inbox. Ele não é anexado no Odoo (os recortes é que
+    # são), mas continua na subpasta "Processados" do Drive como cópia de
+    # segurança -- é de lá que dá para refazer a divisão se algo sair errado.
+    caminho.unlink(missing_ok=True)
+
+    contexto = caminho.with_name(caminho.name + SUFIXO_CONTEXTO)
+    if contexto.exists():
+        contexto.unlink()
 
 
 # ------------------------------------------------------------ processamento
@@ -397,40 +499,16 @@ def processar_arquivo(caminho: Path) -> list[dict]:
     return resultados
 
 
-def arquivar_original(caminho: Path, resultados: list[dict]) -> Path:
-    """Move o binário original para ./arquivos/ UMA única vez, com nome
-    definitivo. Todos os JSONs daquele arquivo apontam para este caminho --
-    é isso que elimina o FileNotFoundError da versão anterior (D2)."""
-    ARQUIVOS_DIR.mkdir(exist_ok=True)
-    melhor = max(
-        resultados,
-        key=lambda r: r.get("confianca_extracao") or 0,
-    )
-    identificador = chave_identificadora(melhor.get("campos_extraidos") or {})
-    destino = ARQUIVOS_DIR / nome_final(
-        identificador, melhor["checksum_sha1"], caminho.suffix
-    )
-    if destino.exists():
-        destino.unlink()  # mesmo conteúdo, mesmo nome: reprocessamento do mesmo arquivo
-    shutil.move(str(caminho), str(destino))
-
-    # O contexto já foi lido e copiado para dentro de cada resultado; o arquivo
-    # não pode ficar para trás na inbox ou seria reprocessado para sempre.
-    contexto = caminho.with_name(caminho.name + SUFIXO_CONTEXTO)
-    if contexto.exists():
-        contexto.unlink()
-
-    return destino
-
-
-def gravar_resultados(resultados: list[dict], arquivo_arquivado: Path):
+def gravar_resultados(resultados: list[dict]):
+    """Um JSON por resultado, cada um apontando para SEU arquivo -- depois da
+    divisão por tipo, cada resultado tem um arquivo próprio."""
     PROCESSADOS_DIR.mkdir(exist_ok=True)
     REVISAO_DIR.mkdir(exist_ok=True)
 
     for resultado in resultados:
-        resultado["arquivo_processado"] = str(arquivo_arquivado)
+        arquivo = Path(resultado["arquivo_processado"])
         pasta = PROCESSADOS_DIR if resultado["status"] == "auto" else REVISAO_DIR
-        nome_json = f"{arquivo_arquivado.stem}__{resultado['tipo_documento']}.json"
+        nome_json = f"{arquivo.stem}.json"
         caminho_json = pasta / nome_json
         caminho_json.write_text(
             json.dumps(resultado, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -478,8 +556,8 @@ def main():
         print(f"Processando: {arquivo.name}")
         try:
             resultados = processar_arquivo(arquivo)
-            arquivado = arquivar_original(arquivo, resultados)
-            gravar_resultados(resultados, arquivado)
+            arquivar_por_tipo(arquivo, resultados)
+            gravar_resultados(resultados)
             tipos = ", ".join(r["tipo_documento"] for r in resultados)
             dono = resultados[0].get("partner_id")
             complemento = f" (contato {dono} já conhecido)" if dono else ""
