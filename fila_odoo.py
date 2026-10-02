@@ -34,10 +34,13 @@ ORIGENS_VALIDAS = ("whatsapp", "drive", "anamnese", "pesquisa", "outro")
 # sao eles que voce confere antes de confirmar.
 ORDEM_CAMPOS = [
     "nome_completo", "numero_cpf", "numero_rg", "orgao_emissor",
-    "numero_car", "numero_matricula", "numero_protocolo",
-    "titular", "documento_titular",
-    "municipio", "comarca", "cartorio", "uf",
-    "area_ha", "area_total_ha", "data_emissao",
+    "numero_car", "codigo_imovel_incra", "numero_ccir", "exercicio",
+    "numero_matricula", "numero_protocolo",
+    "titular", "documento_titular", "condicao_titular", "percentual_detencao",
+    "outros_titulares", "denominacao",
+    "municipio", "localidade", "comarca", "cartorio", "outras_matriculas", "uf",
+    "area_ha", "area_total_ha", "classificacao_fundiaria",
+    "modulo_fiscal_ha", "numero_modulos_fiscais", "data_emissao",
     "atividade_declarada", "data_nascimento", "numero_registro_cnh",
     "filiacao_mae", "filiacao_pai",
     "logradouro", "numero", "bairro", "cep", "tipo_comprovante",

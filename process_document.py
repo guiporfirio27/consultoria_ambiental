@@ -84,15 +84,21 @@ nome do arquivo, que você não recebe):
 - MAT-IMV (matrícula de imóvel, documento de cartório de registro de imóveis)
 - CAR (recibo do Cadastro Ambiental Rural — SICAR)
 - CADPRO (comprovante de Cadastro de Produtor Rural)
+- CCIR (Certificado de Cadastro de Imóvel Rural — INCRA/SNCR; traz o código do
+  imóvel rural, os titulares com sua condição e os dados de registro/matrícula)
 - COMP-RES (comprovante de residência — conta de luz, água, telefone, etc.)
 - NAO_IDENTIFICADO (não se encaixa em nenhum tipo acima, ou está ilegível)
 
-Documentos longos (matrícula, CAR) têm páginas de continuação sem cabeçalho:
+Não confunda CCIR com recibo do CAR: o CCIR é emitido pelo INCRA, traz
+"Código do Imóvel Rural" no formato 000.000.000.000-0 e dados de módulo fiscal;
+o recibo do CAR é do SICAR e traz um código PR-0000000-... .
+
+Documentos longos (matrícula, CAR, CCIR) têm páginas de continuação sem cabeçalho:
 classifique-as pelo conteúdo, não exija o cabeçalho para reconhecer o tipo.
 
 Responda APENAS com um JSON válido, sem texto antes ou depois:
 
-{"tipo_documento": "RG|CNH|CPF|MAT-IMV|CAR|CADPRO|COMP-RES|NAO_IDENTIFICADO", "confianca": 0-100, "motivo": "string curta"}
+{"tipo_documento": "RG|CNH|CPF|MAT-IMV|CAR|CADPRO|CCIR|COMP-RES|NAO_IDENTIFICADO", "confianca": 0-100, "motivo": "string curta"}
 """
 
 PROMPTS_EXTRACAO = {
@@ -128,10 +134,35 @@ interpretar o papel dessa pessoa. Se o CPF/CNPJ não aparecer, retorne null.
 Esta pode ser uma página de continuação: extraia só o que estiver visível
 nesta página e retorne null para o resto.""",
     "CADPRO": """Extraia os dados deste comprovante de Cadastro de Produtor Rural. Responda apenas com JSON:
-{"numero_protocolo": "string ou null", "titular": "string ou null", "documento_titular": "string ou null", "municipio": "string ou null", "atividade_declarada": "string ou null", "data_emissao": "AAAA-MM-DD ou null", "confianca": 0-100}
+{"numero_protocolo": "string ou null", "titular": "string ou null", "documento_titular": "string ou null", "municipio": "string ou null", "localidade": "string ou null", "cep": "string ou null", "atividade_declarada": "string ou null", "data_emissao": "AAAA-MM-DD ou null", "confianca": 0-100}
+
+Sobre "localidade" e "cep": são os da PROPRIEDADE (comunidade, bairro rural,
+linha, estrada), não o endereço residencial do produtor, se os dois aparecerem.
 
 Sobre "documento_titular": o CPF ou CNPJ do titular, como aparece no
 documento. Se não aparecer, retorne null — nunca deduza a partir do nome.""",
+    "CCIR": """Extraia os dados deste CCIR (Certificado de Cadastro de Imóvel Rural, INCRA/SNCR). Responda apenas com JSON:
+{"codigo_imovel_incra": "string ou null", "numero_ccir": "string ou null", "exercicio": "string ou null", "denominacao": "string ou null", "municipio": "string ou null", "uf": "string ou null", "area_total_ha": "number ou null", "classificacao_fundiaria": "string ou null", "modulo_fiscal_ha": "number ou null", "numero_modulos_fiscais": "number ou null", "fracao_minima_parcelamento_ha": "number ou null", "numero_matricula": "string ou null", "cartorio": "string ou null", "outras_matriculas": "string ou null", "titular": "string ou null", "documento_titular": "string ou null", "condicao_titular": "string ou null", "percentual_detencao": "number ou null", "outros_titulares": "string ou null", "data_emissao": "AAAA-MM-DD ou null", "confianca": 0-100}
+
+Regras:
+- "codigo_imovel_incra": o "Código do Imóvel Rural" exatamente como impresso,
+  com pontos e hífen (ex.: 950.068.123.456-7). Não confunda com o número do
+  CCIR nem com o código do CAR.
+- "numero_ccir": o número do certificado, se impresso; "exercicio": o ano.
+- Titulares: o CCIR lista um ou mais titulares, cada um com CPF/CNPJ,
+  condição (Proprietário, Posseiro a justo título, Posseiro por simples
+  ocupação, etc.) e percentual de detenção. Em "titular", "documento_titular",
+  "condicao_titular" e "percentual_detencao" traga o titular DECLARANTE; se não
+  houver indicação, o de MAIOR percentual. Os demais vão em "outros_titulares"
+  como texto: "Nome (CPF/CNPJ, condição, %); Nome (...)".
+- Matrículas: os dados de registro trazem uma ou mais matrículas. Em
+  "numero_matricula" e "cartorio" traga a primeira; as demais vão em
+  "outras_matriculas" como texto: "nº (cartório); nº (cartório)".
+- Áreas em hectares, número com ponto decimal.
+- Nunca deduza CPF/CNPJ a partir do nome. Campo ilegível = null.
+
+Esta pode ser uma página de continuação: extraia só o que estiver visível
+nesta página e retorne null para o resto.""",
     "COMP-RES": """Extraia os dados deste comprovante de residência. Responda apenas com JSON:
 {"nome_titular": "string ou null", "logradouro": "string ou null", "numero": "string ou null", "bairro": "string ou null", "municipio": "string ou null", "uf": "string ou null", "cep": "string ou null", "tipo_comprovante": "luz|agua|telefone|outro|null", "data_emissao": "AAAA-MM-DD ou null", "confianca": 0-100}""",
 }
@@ -237,6 +268,7 @@ def chave_identificadora(campos: dict) -> str:
         "numero_cpf",
         "documento_titular",
         "numero_car",
+        "codigo_imovel_incra",
         "numero_matricula",
         "numero_protocolo",
         "numero_rg",

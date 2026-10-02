@@ -23,13 +23,14 @@ nome do arquivo, que você não recebe):
 - MAT-IMV (matrícula de imóvel, documento de cartório de registro de imóveis)
 - CAR (recibo do Cadastro Ambiental Rural — SICAR)
 - CADPRO (comprovante de Cadastro de Produtor Rural)
+- CCIR (Certificado de Cadastro de Imóvel Rural — INCRA/SNCR)
 - COMP-RES (comprovante de residência — conta de luz, água, telefone, etc.)
 - NAO_IDENTIFICADO (não se encaixa em nenhum tipo acima, ou está ilegível)
 
 Responda APENAS com um JSON válido, sem texto antes ou depois:
 
 {
-  "tipo_documento": "RG | CPF | MAT-IMV | CAR | CADPRO | COMP-RES | NAO_IDENTIFICADO",
+  "tipo_documento": "RG | CNH | CPF | MAT-IMV | CAR | CADPRO | CCIR | COMP-RES | NAO_IDENTIFICADO",
   "confianca": 0-100,
   "motivo": "justificativa breve (máx. 20 palavras) baseada no que está visível na página"
 }
@@ -124,11 +125,61 @@ apenas com JSON:
 {
   "numero_protocolo": "string ou null",
   "titular": "string ou null",
+  "documento_titular": "string ou null",
+  "municipio": "string ou null",            // não é gravado (D4)
+  "localidade": "string ou null",           // da propriedade; só preenche se vazio
+  "cep": "string ou null",                  // da propriedade; só preenche se vazio
   "atividade_declarada": "string ou null",
   "data_emissao": "AAAA-MM-DD ou null",
   "confianca": 0-100
 }
 ```
+
+### CCIR (Certificado de Cadastro de Imóvel Rural)
+
+Incluído em 02/10/2026. O CCIR traz o **código do imóvel rural (INCRA/SNCR)**,
+exigido no cadastro do CAR, e liga o imóvel à **matrícula** e ao
+**proprietário**. É fonte **complementar** (decisão D4): só preenche campos
+vazios do Imóvel e nunca grava município (que vem sempre da malha do IAT).
+Texto exato do prompt: `PROMPTS_EXTRACAO["CCIR"]` em `process_document.py`.
+
+```
+{
+  "codigo_imovel_incra": "string ou null",   // ex.: 950.068.123.456-7
+  "numero_ccir": "string ou null",
+  "exercicio": "string ou null",
+  "denominacao": "string ou null",
+  "municipio": "string ou null",
+  "uf": "string ou null",
+  "area_total_ha": "number ou null",
+  "classificacao_fundiaria": "string ou null",
+  "modulo_fiscal_ha": "number ou null",
+  "numero_modulos_fiscais": "number ou null",
+  "fracao_minima_parcelamento_ha": "number ou null",
+  "numero_matricula": "string ou null",      // primeira matrícula
+  "cartorio": "string ou null",
+  "outras_matriculas": "string ou null",     // "nº (cartório); nº (cartório)"
+  "titular": "string ou null",               // declarante ou maior %
+  "documento_titular": "string ou null",
+  "condicao_titular": "string ou null",      // Proprietário, Posseiro...
+  "percentual_detencao": "number ou null",
+  "outros_titulares": "string ou null",      // "Nome (CPF, condição, %); ..."
+  "data_emissao": "AAAA-MM-DD ou null",
+  "confianca": 0-100
+}
+```
+
+Gravação (`write_to_odoo.py` e ação 1420 do Odoo):
+
+| Campo extraído | Campo no Odoo (`x_imovel`) | Regra |
+|---|---|---|
+| codigo_imovel_incra | `x_codigo_incra` | chave de busca do imóvel |
+| numero_matricula | `x_numero_matricula` | chave alternativa (liga ao imóvel já cadastrado pela matrícula); só preenche se vazio |
+| denominacao, cartorio | `x_denominacao`, `x_cartorio` | só preenche se vazio |
+| numero_ccir, exercicio, area_total_ha, numero_modulos_fiscais, classificacao_fundiaria, data_emissao | `x_ccir_numero`, `x_ccir_exercicio`, `x_ccir_area_total_ha`, `x_ccir_modulos_fiscais`, `x_ccir_classificacao_fundiaria`, `x_ccir_data_emissao` | sempre atualiza (CCIR novo substitui o anterior) |
+| titular + documento_titular | `x_titular_documento_id` | se vazio |
+| condicao_titular = "Proprietário" | `x_proprietario_id` | se vazio |
+| municipio | — | **não grava** (D4) |
 
 ### COMP-RES (comprovante de residência)
 ```

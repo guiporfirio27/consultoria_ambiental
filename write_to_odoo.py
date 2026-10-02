@@ -16,13 +16,23 @@ Rotas de gravação:
     conhecido e nem se consulta CPF. Senão, busca por CPF; se não achar, cria
     marcado `pendente_confirmacao`, sem assumir papel.
 
-  IMÓVEL (MAT-IMV, CAR, CADPRO) -> x_imovel
-    Busca ou cria pelo número do próprio documento. O titular declarado vai
+  IMÓVEL (MAT-IMV, CAR, CADPRO, CCIR) -> x_imovel
+    Busca ou cria pelo número do próprio documento (CCIR: código INCRA; se
+    não achar, pela matrícula que consta no CCIR). O titular declarado vai
     para `x_titular_documento_id` (campo neutro), NUNCA `x_proprietario_id`:
     o titular de um CAR pode legitimamente ser arrendatário, e gravá-lo como
     proprietário seria um erro silencioso e frequente.
 
   COMP-RES e NAO_IDENTIFICADO -> fila de confirmação no Odoo.
+
+  Hierarquia de fontes (decisão D4, 02/10/2026): CADPRO e CCIR são fontes
+  COMPLEMENTARES -- só preenchem campos vazios do imóvel, nunca geram
+  pendência por divergência e nunca gravam município. O município vem sempre
+  da malha do IAT, gravado pelo gerador do mapa de situação.
+
+  Exceção do CCIR: ele declara a CONDIÇÃO de cada titular. Quando o titular
+  declarante é "Proprietário", ele é gravado também em `x_proprietario_id`
+  (só se o campo estiver vazio). Posseiro/arrendatário ficam só como titular.
 
 O que mudou nesta versão
 ------------------------
@@ -81,9 +91,32 @@ CONFIG_IMOVEL = {
     "CADPRO": {
         "campo_chave_json": "numero_protocolo",
         "campo_chave_odoo": "x_numero_cadpro_protocolo",
-        "texto": {"municipio": "x_municipio"},
+        # Sem município (D4): ele vem sempre da malha do IAT.
+        "texto": {"localidade": "x_localidade", "cep": "x_cep"},
         "numerico": {},
         "data": {},
+        "complementar": True,
+    },
+    "CCIR": {
+        "campo_chave_json": "codigo_imovel_incra",
+        "campo_chave_odoo": "x_codigo_incra",
+        # Quando o código INCRA ainda não está em nenhum imóvel, o CCIR se
+        # liga ao imóvel pela matrícula que ele mesmo informa.
+        "chave_alternativa": ("numero_matricula", "x_numero_matricula"),
+        "texto": {
+            "denominacao": "x_denominacao",
+            "numero_matricula": "x_numero_matricula",
+            "cartorio": "x_cartorio",
+            "numero_ccir": "x_ccir_numero",
+            "exercicio": "x_ccir_exercicio",
+            "classificacao_fundiaria": "x_ccir_classificacao_fundiaria",
+        },
+        "numerico": {
+            "area_total_ha": "x_ccir_area_total_ha",
+            "numero_modulos_fiscais": "x_ccir_modulos_fiscais",
+        },
+        "data": {"data_emissao": "x_ccir_data_emissao"},
+        "complementar": True,
     },
 }
 
@@ -110,11 +143,24 @@ CAMPOS_ATUALIZAVEIS = {
     "x_area_ha",
     "x_car_area_total_ha",
     "x_car_data_emissao",
+    # Campos próprios do CCIR: um certificado de exercício mais novo substitui
+    # o anterior.
+    "x_ccir_numero",
+    "x_ccir_exercicio",
+    "x_ccir_area_total_ha",
+    "x_ccir_modulos_fiscais",
+    "x_ccir_classificacao_fundiaria",
+    "x_ccir_data_emissao",
 }
 
 
-def aplicar_valores(modelo: str, registro_id: int, valores: dict) -> tuple[dict, list]:
-    """Aplica só o que é seguro aplicar. Devolve (aplicados, divergências)."""
+def aplicar_valores(modelo: str, registro_id: int, valores: dict,
+                    complementar: bool = False) -> tuple[dict, list]:
+    """Aplica só o que é seguro aplicar. Devolve (aplicados, divergências).
+
+    complementar=True (CADPRO, CCIR): a fonte só completa dados faltantes.
+    Divergência em campo já preenchido é registrada no log e descartada --
+    não vira pendência, porque a fonte de nível mais alto já decidiu."""
     if not valores:
         return {}, []
 
@@ -142,8 +188,12 @@ def aplicar_valores(modelo: str, registro_id: int, valores: dict) -> tuple[dict,
 
         if campo in CAMPOS_ATUALIZAVEIS:
             aplicar[campo] = novo
-            divergencias.append(
-                f"{campo}: atualizado de '{antigo}' para '{novo}'")
+            if not complementar:
+                divergencias.append(
+                    f"{campo}: atualizado de '{antigo}' para '{novo}'")
+        elif complementar:
+            print(f"[info] {modelo} {registro_id}: {campo} mantido '{antigo}' "
+                  f"(fonte complementar dizia '{novo}')")
         else:
             divergencias.append(
                 f"{campo}: documento diz '{novo}', cadastro tem '{antigo}' "
@@ -244,8 +294,20 @@ def vincular_titular(resultado: dict, imovel_id: int, caminho_arquivo: str):
         return
 
     atual = _executar(
-        models, uid, "x_imovel", "read", [imovel_id], ["x_titular_documento_id"])
-    if atual and atual[0].get("x_titular_documento_id"):
+        models, uid, "x_imovel", "read", [imovel_id],
+        ["x_titular_documento_id", "x_proprietario_id"])
+    atual = atual[0] if atual else {}
+    ja_tem_titular = bool(atual.get("x_titular_documento_id"))
+
+    # CCIR declara a condição do titular: "Proprietário" preenche também o
+    # proprietário do imóvel, se ainda estiver vazio.
+    proprietario_pelo_ccir = (
+        resultado["tipo_documento"] == "CCIR"
+        and "propriet" in (campos.get("condicao_titular") or "").lower()
+        and not atual.get("x_proprietario_id")
+    )
+
+    if ja_tem_titular and not proprietario_pelo_ccir:
         return  # já vinculado, não sobrescrever decisão humana
 
     pessoa = buscar_ou_criar_pessoa(
@@ -257,10 +319,14 @@ def vincular_titular(resultado: dict, imovel_id: int, caminho_arquivo: str):
         caminho_arquivo,
         origem="titular declarado em documento de imóvel",
     )
-    _executar(
-        models, uid, "x_imovel", "write", [imovel_id],
-        {"x_titular_documento_id": pessoa["partner_id"]})
-    print(f"[ok] titular {pessoa['partner_id']} vinculado ao imóvel {imovel_id}")
+    valores = {}
+    if not ja_tem_titular:
+        valores["x_titular_documento_id"] = pessoa["partner_id"]
+    if proprietario_pelo_ccir:
+        valores["x_proprietario_id"] = pessoa["partner_id"]
+    _executar(models, uid, "x_imovel", "write", [imovel_id], valores)
+    print(f"[ok] pessoa {pessoa['partner_id']} gravada no imóvel {imovel_id}: "
+          f"{list(valores)}")
 
 
 def gravar_imovel(resultado: dict) -> int | None:
@@ -268,12 +334,15 @@ def gravar_imovel(resultado: dict) -> int | None:
     campos = resultado.get("campos_extraidos") or {}
     config = CONFIG_IMOVEL[tipo]
 
-    # Contexto de origem tem prioridade: se já sabemos o imóvel, é ele.
-    if resultado.get("imovel_id"):
-        return resultado["imovel_id"]
-
+    complementar = config.get("complementar", False)
     numero_chave = campos.get(config["campo_chave_json"])
-    if not numero_chave:
+
+    # Contexto de origem tem prioridade: se já sabemos o imóvel, é ele. Antes,
+    # o código devolvia o id aqui SEM gravar nada -- documento que chegava
+    # com o imóvel já conhecido (WhatsApp/anamnese) era anexado mas os campos
+    # nunca eram preenchidos.
+    alvo = resultado.get("imovel_id")
+    if not alvo and not numero_chave:
         return None
 
     valores = {config["campo_chave_odoo"]: numero_chave}
@@ -289,14 +358,31 @@ def gravar_imovel(resultado: dict) -> int | None:
         if data:
             valores[campo_odoo] = data
 
-    ids = _executar(
-        models, uid, "x_imovel", "search",
-        [[config["campo_chave_odoo"], "=", numero_chave]])
+    if numero_chave:
+        valores[config["campo_chave_odoo"]] = numero_chave
+    else:
+        valores.pop(config["campo_chave_odoo"], None)
 
-    if ids:
-        _, divergencias = aplicar_valores("x_imovel", ids[0], valores)
+    if not alvo:
+        ids = _executar(
+            models, uid, "x_imovel", "search",
+            [[config["campo_chave_odoo"], "=", numero_chave]])
+        alvo = ids[0] if ids else None
+
+    alternativa = config.get("chave_alternativa")
+    if not alvo and alternativa and campos.get(alternativa[0]):
+        ids = _executar(
+            models, uid, "x_imovel", "search",
+            [[alternativa[1], "=", campos[alternativa[0]]]])
+        if ids:
+            alvo = ids[0]
+            print(f"[ok] {tipo} ligado ao imóvel {alvo} pela {alternativa[0]}")
+
+    if alvo:
+        _, divergencias = aplicar_valores("x_imovel", alvo, valores,
+                                          complementar=complementar)
         resultado["_divergencias"] = divergencias
-        return ids[0]
+        return alvo
 
     valores["x_name"] = numero_chave
     # create recebe o dict direto: passar [valores] devolveria uma LISTA de ids.
