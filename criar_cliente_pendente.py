@@ -8,7 +8,7 @@ marca x_status_cadastro='pendente_confirmacao' para confirmação humana.
 
 Usado em dois momentos:
   1. Documento de pessoa (RG/CNH/CPF) cujo CPF não corresponde a ninguém.
-  2. Titular declarado num documento de imóvel (CAR/MAT-IMV/CADPRO) --
+  2. Titular declarado num documento de imóvel (CAR/MAT-IMV/CADPRO/CCIR) --
      caso em que o papel é ainda mais incerto (o titular de um CAR pode ser
      arrendatário, não proprietário), por isso o vínculo vai para o campo
      neutro x_titular_documento_id, nunca para x_proprietario_id.
@@ -199,7 +199,7 @@ def buscar_ou_criar_pessoa(
     dados_extraidos deve conter pelo menos:
         - 'numero_cpf'      CPF ou CNPJ (string)
         - 'nome_completo'
-        - 'tipo_documento'  ('RG' | 'CNH' | 'CPF' | 'CAR' | 'MAT-IMV' | 'CADPRO')
+        - 'tipo_documento'  ('RG' | 'CNH' | 'CPF' | 'CAR' | 'MAT-IMV' | 'CADPRO' | 'CCIR')
         - 'numero_rg', 'orgao_emissor' (opcionais)
 
     Retorna {'partner_id': int, 'criado': bool}.
