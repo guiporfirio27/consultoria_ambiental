@@ -362,15 +362,30 @@ def registrar_sucesso(odoo, dados, resultado, pdf, avisos):
     processo_id = dados["processo_id"]
     notas = []
 
-    # 1. PDF anexado ao Processo
+    # 1. PDF anexado ao Processo.
+    # ATENÇÃO: nesta base o campo é `db_datas`. `datas` é ignorado em silêncio
+    # no create() e gera anexo de 0 bytes (mesmo defeito D1 do pipeline de
+    # documentos). Por isso o tamanho é conferido logo depois.
     conteudo = Path(pdf).read_bytes()
     anexo_id = odoo.call("ir.attachment", "create", {
         "name": Path(pdf).name,
-        "datas": base64.b64encode(conteudo).decode(),
+        "db_datas": base64.b64encode(conteudo).decode(),
         "res_model": "project.project",
         "res_id": processo_id,
         "mimetype": "application/pdf",
     })
+    tamanho = odoo.ler("ir.attachment", anexo_id, ["file_size"]).get("file_size") or 0
+    if tamanho <= 0:
+        odoo.call("ir.attachment", "unlink", [anexo_id])
+        raise ErroOdoo("O PDF chegou vazio ao Odoo (0 bytes) e foi removido. "
+                       f"O arquivo continua salvo em {pdf}.")
+
+    # Limpa anexos de mapa vazios deixados por versões anteriores do script.
+    vazios = odoo.call("ir.attachment", "search", [
+        ["res_model", "=", "project.project"], ["res_id", "=", processo_id],
+        ["name", "=like", "MAPA-SIT_%"], ["file_size", "=", 0]])
+    if vazios:
+        odoo.call("ir.attachment", "unlink", vazios)
 
     # 2. Área livre no Empreendimento (D2)
     if resultado.get("area_livre_ha") is not None and dados.get("empreendimento_id"):
@@ -492,6 +507,12 @@ def processar_processo(processo_id, pasta_gis, margem_m=400, osm=True, qpt=None,
 
     avisos += _avisos_do_log(tee_out.buffer.getvalue())
     if gravar_no_odoo:
-        registrar_sucesso(odoo, dados, resultado or {}, saida, avisos)
-        print(f"[ok] PDF anexado ao Processo {processo_id} e status 'Gerado' gravado.")
+        try:
+            anexo_id = registrar_sucesso(odoo, dados, resultado or {}, saida, avisos)
+        except ErroOdoo as e:
+            registrar_erro(odoo, processo_id, str(e))
+            print(f"[ERRO] {e}")
+            return saida
+        print(f"[ok] PDF anexado ao Processo {processo_id} (anexo {anexo_id}) "
+              f"e status 'Gerado' gravado.")
     return saida
