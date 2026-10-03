@@ -72,8 +72,11 @@ def carregar_credenciais():
             '{"url": ..., "db": ..., "email": ..., "api_key": ...} '
             "ou defina ODOO_URL, ODOO_DB, ODOO_EMAIL e ODOO_API_KEY.")
     dados = json.loads(arquivo.read_text(encoding="utf-8"))
-    if dados.get("url") and not dados.get("db"):
+    # db vazio ou ainda com o texto do modelo -> subdomínio da url
+    if dados.get("url") and (not dados.get("db") or "COLOQUE" in str(dados["db"]).upper()):
         dados["db"] = banco_padrao(dados["url"])
+    if "COLE_A_CHAVE" in str(dados.get("api_key", "")).upper():
+        dados["api_key"] = ""
     faltando = [k for k in ("url", "db", "email", "api_key") if not dados.get(k)]
     if faltando:
         raise ErroOdoo(f"{arquivo} sem: {', '.join(faltando)}")
@@ -92,7 +95,14 @@ class Odoo:
         self.url = url.rstrip("/").removesuffix("/odoo")
         self.db, self.api_key = db, api_key
         comum = xmlrpc.client.ServerProxy(f"{self.url}/xmlrpc/2/common", allow_none=True)
-        self.uid = comum.authenticate(db, email, api_key, {})
+        try:
+            self.uid = comum.authenticate(db, email, api_key, {})
+        except xmlrpc.client.Fault as e:
+            if "does not exist" in str(e.faultString):
+                raise ErroOdoo(
+                    f"O banco '{db}' não existe neste Odoo. Confira o nome em "
+                    "odoo.com > Meus bancos de dados e rode o configurar_credenciais.py.") from None
+            raise
         if not self.uid:
             raise ErroOdoo("Login no Odoo recusado — confira e-mail, banco e chave de API.")
         self._models = xmlrpc.client.ServerProxy(f"{self.url}/xmlrpc/2/object", allow_none=True)
