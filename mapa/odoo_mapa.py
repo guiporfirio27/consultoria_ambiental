@@ -20,7 +20,8 @@ Credenciais (nesta ordem):
      (os mesmos nomes do pipeline de documentos);
   2. arquivo  %USERPROFILE%\\.gp_odoo.json  (Windows) ou ~/.gp_odoo.json:
        {"url": "https://gp-construcaoengenharia.odoo.com",
-        "db": "<nome do banco>", "email": "guiporfirio27@gmail.com",
+        "db": "<nome do banco; se omitido, usa o subdomínio da url>",
+        "email": "guiporfirio27@gmail.com",
         "api_key": "<chave API_mapa_qgis>"}
   Nunca coloque a chave dentro deste arquivo nem na pasta Dados GIS.
 """
@@ -71,10 +72,22 @@ def carregar_credenciais():
             '{"url": ..., "db": ..., "email": ..., "api_key": ...} '
             "ou defina ODOO_URL, ODOO_DB, ODOO_EMAIL e ODOO_API_KEY.")
     dados = json.loads(arquivo.read_text(encoding="utf-8"))
+    # db vazio ou ainda com o texto do modelo -> subdomínio da url
+    if dados.get("url") and (not dados.get("db") or "COLOQUE" in str(dados["db"]).upper()):
+        dados["db"] = banco_padrao(dados["url"])
+    if "COLE_A_CHAVE" in str(dados.get("api_key", "")).upper():
+        dados["api_key"] = ""
     faltando = [k for k in ("url", "db", "email", "api_key") if not dados.get(k)]
     if faltando:
         raise ErroOdoo(f"{arquivo} sem: {', '.join(faltando)}")
     return dados
+
+
+def banco_padrao(url):
+    """No Odoo online (odoo.com), o nome do banco costuma ser o subdomínio:
+    https://gp-construcaoengenharia.odoo.com -> gp-construcaoengenharia."""
+    host = re.sub(r"^https?://", "", url).split("/")[0]
+    return host.split(".")[0]
 
 
 class Odoo:
@@ -82,7 +95,14 @@ class Odoo:
         self.url = url.rstrip("/").removesuffix("/odoo")
         self.db, self.api_key = db, api_key
         comum = xmlrpc.client.ServerProxy(f"{self.url}/xmlrpc/2/common", allow_none=True)
-        self.uid = comum.authenticate(db, email, api_key, {})
+        try:
+            self.uid = comum.authenticate(db, email, api_key, {})
+        except xmlrpc.client.Fault as e:
+            if "does not exist" in str(e.faultString):
+                raise ErroOdoo(
+                    f"O banco '{db}' não existe neste Odoo. Confira o nome em "
+                    "odoo.com > Meus bancos de dados e rode o configurar_credenciais.py.") from None
+            raise
         if not self.uid:
             raise ErroOdoo("Login no Odoo recusado — confira e-mail, banco e chave de API.")
         self._models = xmlrpc.client.ServerProxy(f"{self.url}/xmlrpc/2/object", allow_none=True)
@@ -342,15 +362,30 @@ def registrar_sucesso(odoo, dados, resultado, pdf, avisos):
     processo_id = dados["processo_id"]
     notas = []
 
-    # 1. PDF anexado ao Processo
+    # 1. PDF anexado ao Processo.
+    # ATENÇÃO: nesta base o campo é `db_datas`. `datas` é ignorado em silêncio
+    # no create() e gera anexo de 0 bytes (mesmo defeito D1 do pipeline de
+    # documentos). Por isso o tamanho é conferido logo depois.
     conteudo = Path(pdf).read_bytes()
     anexo_id = odoo.call("ir.attachment", "create", {
         "name": Path(pdf).name,
-        "datas": base64.b64encode(conteudo).decode(),
+        "db_datas": base64.b64encode(conteudo).decode(),
         "res_model": "project.project",
         "res_id": processo_id,
         "mimetype": "application/pdf",
     })
+    tamanho = odoo.ler("ir.attachment", anexo_id, ["file_size"]).get("file_size") or 0
+    if tamanho <= 0:
+        odoo.call("ir.attachment", "unlink", [anexo_id])
+        raise ErroOdoo("O PDF chegou vazio ao Odoo (0 bytes) e foi removido. "
+                       f"O arquivo continua salvo em {pdf}.")
+
+    # Limpa anexos de mapa vazios deixados por versões anteriores do script.
+    vazios = odoo.call("ir.attachment", "search", [
+        ["res_model", "=", "project.project"], ["res_id", "=", processo_id],
+        ["name", "=like", "MAPA-SIT_%"], ["file_size", "=", 0]])
+    if vazios:
+        odoo.call("ir.attachment", "unlink", vazios)
 
     # 2. Área livre no Empreendimento (D2)
     if resultado.get("area_livre_ha") is not None and dados.get("empreendimento_id"):
@@ -472,6 +507,12 @@ def processar_processo(processo_id, pasta_gis, margem_m=400, osm=True, qpt=None,
 
     avisos += _avisos_do_log(tee_out.buffer.getvalue())
     if gravar_no_odoo:
-        registrar_sucesso(odoo, dados, resultado or {}, saida, avisos)
-        print(f"[ok] PDF anexado ao Processo {processo_id} e status 'Gerado' gravado.")
+        try:
+            anexo_id = registrar_sucesso(odoo, dados, resultado or {}, saida, avisos)
+        except ErroOdoo as e:
+            registrar_erro(odoo, processo_id, str(e))
+            print(f"[ERRO] {e}")
+            return saida
+        print(f"[ok] PDF anexado ao Processo {processo_id} (anexo {anexo_id}) "
+              f"e status 'Gerado' gravado.")
     return saida
