@@ -26,7 +26,8 @@ Console Python, ou Ctrl+Alt+P).
 
 Pré-requisitos (uma vez só):
   * odoo_mapa.py e gerar_mapa_situacao.py na mesma pasta deste arquivo;
-  * credenciais em  %USERPROFILE%\.gp_odoo.json  (ver odoo_mapa.py).
+  * credenciais: rode uma vez o configurar_credenciais.py (cria o
+    arquivo %USERPROFILE%\.gp_odoo.json e testa o login).
 """
 
 # ===========================================================================
