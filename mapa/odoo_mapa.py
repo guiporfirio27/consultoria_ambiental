@@ -247,6 +247,7 @@ def ler_dados_processo(odoo, processo_id):
         pendencias.append("Empreendimento sem Empreendedor.")
     else:
         pessoa = odoo.ler("res.partner", _id(emp["x_empreendedor_id"]), ["name", "vat"])
+        dados["empreendedor_id"] = pessoa["id"]
         dados["cliente"] = (pessoa.get("name") or "").strip()
         vat = pessoa.get("vat") or ""
         if not vat:
@@ -358,6 +359,68 @@ def registrar_erro(odoo, processo_id, motivo):
     _postar(odoo, processo_id, f"Mapa de situação NÃO gerado. Motivo: {motivo[:1500]}")
 
 
+# Subpasta do Processo (app Documentos) onde o mapa é fichado. Pode ser
+# trocada no Odoo, sem mexer no código, pelo parâmetro do sistema
+# gp.documentos.subpasta_mapa (início do nome da subpasta, ex.: "03").
+SUBPASTA_MAPA_PADRAO = "01"
+
+
+def _parametro(odoo, chave):
+    r = odoo.call("ir.config_parameter", "search_read", [["key", "=", chave]],
+                  fields=["value"], limit=1)
+    return (r[0].get("value") or "").strip() if r else ""
+
+
+def fichar_no_documentos(odoo, processo_id, anexo_id, nome, partner_id=None):
+    """Põe o mapa no app Documentos, na pasta do PRÓPRIO Processo.
+
+    Anexo (ir.attachment) e app Documentos (documents.document) são coisas
+    diferentes no Odoo: o anexo aparece no histórico do Processo; o app
+    Documentos lê documents.document. Criar a ficha apontando para o anexo não
+    muda o vínculo do anexo com o Processo (confirmado no pipeline de
+    documentos).
+
+    Destino, em ordem:
+      1. subpasta do Processo cujo nome começa com gp.documentos.subpasta_mapa
+         (padrão "01" → "01 - Levantamento e Diagnóstico");
+      2. a pasta do Processo;
+      3. a pasta do parâmetro gp.documentos.pasta_processos.
+    Devolve o nome da pasta, ou None se não houver onde fichar."""
+    pasta = None
+    try:
+        proj = odoo.ler("project.project", processo_id, ["documents_folder_id"])
+        pasta = proj.get("documents_folder_id") or None
+    except Exception:
+        pasta = None
+
+    if pasta:
+        prefixo = _parametro(odoo, "gp.documentos.subpasta_mapa") or SUBPASTA_MAPA_PADRAO
+        sub = odoo.call("documents.document", "search_read",
+                        [["type", "=", "folder"], ["folder_id", "=", pasta[0]],
+                         ["name", "=like", f"{prefixo}%"]],
+                        fields=["name"], limit=1)
+        if sub:
+            pasta = [sub[0]["id"], f"{pasta[1]} / {sub[0]['name']}"]
+    else:
+        reserva = _parametro(odoo, "gp.documentos.pasta_processos")
+        if reserva.isdigit():
+            pasta = [int(reserva), "pasta de Processos"]
+
+    if not pasta:
+        return None
+
+    valores = {"folder_id": pasta[0]}
+    if partner_id:
+        valores["partner_id"] = partner_id
+    ja = odoo.call("documents.document", "search", [["attachment_id", "=", anexo_id]], limit=1)
+    if ja:
+        odoo.call("documents.document", "write", ja, valores)
+    else:
+        valores.update({"name": nome, "attachment_id": anexo_id})
+        odoo.call("documents.document", "create", valores)
+    return pasta[1]
+
+
 def registrar_sucesso(odoo, dados, resultado, pdf, avisos):
     processo_id = dados["processo_id"]
     notas = []
@@ -386,6 +449,18 @@ def registrar_sucesso(odoo, dados, resultado, pdf, avisos):
         ["name", "=like", "MAPA-SIT_%"], ["file_size", "=", 0]])
     if vazios:
         odoo.call("ir.attachment", "unlink", vazios)
+
+    # 1b. Também no app Documentos, na pasta do Processo.
+    try:
+        pasta_docs = fichar_no_documentos(odoo, processo_id, anexo_id, Path(pdf).name,
+                                          dados.get("empreendedor_id"))
+    except Exception as e:  # o anexo já está salvo; não perder o mapa por isso
+        pasta_docs = None
+        notas.append(f"Não foi possível colocar no app Documentos: {e}.")
+    if pasta_docs:
+        notas.append(f"Também no app Documentos: {pasta_docs}.")
+    elif pasta_docs is None and not any("Documentos" in n for n in notas):
+        notas.append("Processo sem pasta no app Documentos: mapa só como anexo.")
 
     # 2. Área livre no Empreendimento (D2)
     if resultado.get("area_livre_ha") is not None and dados.get("empreendimento_id"):
