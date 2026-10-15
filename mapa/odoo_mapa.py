@@ -192,7 +192,8 @@ def _id(m2o):
 def montar_endereco(imovel):
     """Endereço do EMPREENDIMENTO (não do requerente). {municipio} é trocado
     pelo gerador pelo município da malha do IAT (D4)."""
-    partes = [imovel.get("x_denominacao"), imovel.get("x_logradouro"),
+    # Sem via no cadastro, o gerador põe a estrada com nome mais próxima ({via}).
+    partes = [imovel.get("x_denominacao"), imovel.get("x_logradouro") or "{via}",
               imovel.get("x_localidade"), "Zona Rural", "{municipio}/PR"]
     endereco = " - ".join(p.strip() for p in partes if p and str(p).strip())
     cep = normalizar_cep(imovel.get("x_cep"))
@@ -230,7 +231,8 @@ def ler_dados_processo(odoo, processo_id):
     # Coordenada da estrutura principal (anamnese)
     coord = (emp.get("x_coordenada") or "").strip()
     if not coord:
-        pendencias.append("Empreendimento sem coordenada da estrutura principal (anamnese).")
+        avisos.append("Sem localização da estrutura principal: o ponto do mapa será o "
+                      "centro do imóvel no CAR — conferir no satélite.")
     dados["estrutura_coord"] = coord
 
     # Área construída (anamnese, m² → ha)
@@ -302,7 +304,6 @@ def montar_argv(dados, pasta_gis, saida, margem_m=400, osm=True, qpt=None):
     argv = [
         "--dados-dir", str(pasta_gis),
         "--cod-imovel", dados["cod_imovel"],
-        "--estrutura-coord", dados["estrutura_coord"],
         "--cliente", dados["cliente"],
         "--doc-cliente", dados["doc_cliente"],
         "--endereco", dados["endereco_modelo"],
@@ -313,6 +314,8 @@ def montar_argv(dados, pasta_gis, saida, margem_m=400, osm=True, qpt=None):
         "--rosa-ventos", p("rosa_dos_ventos.svg"),
         "--saida", str(saida),
     ]
+    if dados.get("estrutura_coord"):
+        argv += ["--estrutura-coord", dados["estrutura_coord"]]
     if dados.get("area_construida_m2"):
         argv += ["--area-construida-ha", f"{dados['area_construida_m2'] / 10000:.4f}"]
     if osm:
@@ -475,6 +478,20 @@ def registrar_sucesso(odoo, dados, resultado, pdf, avisos):
             odoo.call("x_imovel", "write", [dados["imovel_id"]], {"x_municipio": mun})
             if antigo:
                 notas.append(f"Município corrigido pela malha do IAT: {antigo} → {mun}.")
+
+    # 3b. Via de acesso encontrada automaticamente → Imóvel, se estiver vazio.
+    via = resultado.get("via_auto")
+    if via and dados.get("imovel_id"):
+        atual = odoo.ler("x_imovel", dados["imovel_id"], ["x_logradouro"]).get("x_logradouro")
+        if not atual:
+            odoo.call("x_imovel", "write", [dados["imovel_id"]], {"x_logradouro": via})
+            notas.append(f"Via de acesso obtida da base de vias: {via}.")
+        # O hash passa a refletir o cadastro já com a via gravada; sem isso o
+        # mapa recém-gerado pareceria "desatualizado" na próxima conferência.
+        dados["endereco_modelo"] = dados.get("endereco_modelo", "").replace("{via}", via)
+    if resultado.get("ponto_origem") == "centro_car":
+        notas.append("ATENÇÃO: ponto do mapa = centro do imóvel no CAR (sem localização "
+                     "da estrutura). Conferir no satélite antes do protocolo.")
 
     # 4. Conferência da área do recibo x polígono
     recibo = dados.get("car_area_recibo_ha")

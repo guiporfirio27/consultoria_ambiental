@@ -204,7 +204,7 @@ except (ImportError, AttributeError):
 # de feições em Python e estourar a memória.
 LIMITE_FEICOES_CONTEXTO = 3000
 
-VERSAO = "3.14 (compatível com QGIS 3.34+ e 4.x; área livre calculada; município da malha IAT)"
+VERSAO = "3.15 (QGIS 3.34+/4.x; via de acesso automática; ponto pelo centro do CAR quando falta a coordenada)"
 
 
 # ---------------------------------------------------------------------------
@@ -915,8 +915,30 @@ def _aplicar_rotulo(layer, campo, tamanho_pt=6.0, cor="#ffffff", cor_buffer="#00
 # Camadas do mapa
 # ---------------------------------------------------------------------------
 
+# Via de acesso automática: estrada COM NOME mais próxima, até este raio.
+RAIO_VIA_ACESSO_M = 800.0
+
+
+def _via_mais_proxima(vias_layer, geom_ref, raio_m=RAIO_VIA_ACESSO_M):
+    """Nome da via com nome (campo `rotulo`: name, senão ref) mais próxima de
+    geom_ref, até raio_m. Usa a camada de vias já recortada para o mapa (base
+    OSM local), então não depende de internet. Devolve None se não houver."""
+    if vias_layer is None or geom_ref is None:
+        return None
+    melhor, menor = None, None
+    for f in vias_layer.getFeatures():
+        nome = (f["rotulo"] or "").strip() if "rotulo" in f.fields().names() else ""
+        if not nome:
+            continue
+        d = f.geometry().distance(geom_ref)
+        if d <= raio_m and (menor is None or d < menor):
+            melhor, menor = nome, d
+    return melhor
+
+
 def montar_camadas(fontes, geom_empreendimento, extent, fonte_geom,
                    ponto_estrutura=None, app_faixa=APP_FAIXA_PADRAO_M,
+                   rotulo_ponto="Estrutura física",
                    buscar_osm=False, osm_timeout=40, osm_url=OVERPASS_URL):
     """Cria e estiliza todas as camadas do mapa. Retorna (dict de layers, dict de métricas)."""
     layers = {}
@@ -991,7 +1013,8 @@ def montar_camadas(fontes, geom_empreendimento, extent, fonte_geom,
         est.updateFields()
         f = QgsFeature(est.fields())
         f.setGeometry(QgsGeometry.fromPointXY(ponto_estrutura))
-        f["rotulo"] = "Estrutura física"
+        f["rotulo"] = rotulo_ponto
+        metricas["rotulo_ponto"] = rotulo_ponto
         est.dataProvider().addFeature(f)
         est.updateExtents()
         est.setRenderer(QgsSingleSymbolRenderer(QgsMarkerSymbol.createSimple({
@@ -1623,7 +1646,7 @@ def _montar_legenda(layout, layers, metricas):
                      {"color": COR_IMOVEL_FILL, "outline_color": COR_IMOVEL_LINHA,
                       "outline_width": COR_IMOVEL_ESPESSURA}))
     if "estrutura" in layers:
-        entradas.append(("Estrutura física", "ponto",
+        entradas.append(((metricas or {}).get("rotulo_ponto", "Estrutura física"), "ponto",
                          {"color": COR_ESTRUTURA, "outline_color": "255,255,255,255", "outline_width": "0.3"}))
     if "vegetacao" in layers:
         entradas.append((rotulo_veg, "area", _props_veg()))
@@ -2104,8 +2127,21 @@ def main(argv=None):
         elif est_lat is not None and est_lon is not None:
             ponto_estrutura = _para_mapa(est_lat, est_lon)
         else:
-            print("[aviso] Sem coordenada para a estrutura física — o ponto, o rótulo "
-                  "'Estrutura física' e a cota de distância ficarão fora do mapa.")
+            print("[aviso] Sem coordenada para a estrutura física.")
+
+        # Sem coordenada da anamnese: usa um ponto do polígono do CAR (sempre
+        # dentro do imóvel, equivalente ao centroide do recibo do CAR). O mapa
+        # sai, mas o ponto NÃO é a estrutura: rótulo e aviso deixam isso claro
+        # para conferência no satélite antes do protocolo.
+        ponto_origem = "anamnese" if ponto_estrutura is not None else None
+        rotulo_ponto = "Estrutura física"
+        if ponto_estrutura is None and fonte_geom == "car":
+            ponto_estrutura = geom.pointOnSurface().asPoint()
+            ponto_origem = "centro_car"
+            rotulo_ponto = "Centro do imóvel (CAR)"
+            print("[AVISO] Ponto do mapa = centro do imóvel no CAR (cliente não informou a "
+                  "localização da estrutura). Confira no satélite: distância ao rio e APP "
+                  "são medidas a partir deste ponto.")
 
         # Coerência entre o imóvel (CAR) e o ponto da estrutura: se estiverem
         # a quilômetros de distância, é quase certo que vieram de processos
@@ -2125,6 +2161,7 @@ def main(argv=None):
             fontes, geom, extent_mapa, fonte_geom,
             ponto_estrutura=ponto_estrutura,
             app_faixa=args.app_faixa,
+            rotulo_ponto=rotulo_ponto,
             buscar_osm=args.osm_referencias,
             osm_timeout=args.osm_timeout,
             osm_url=args.osm_url,
@@ -2169,6 +2206,18 @@ def main(argv=None):
 
         # Município (D4): sempre o da malha do IAT.
         endereco = args.endereco
+        via_auto = None
+        if "{via}" in endereco:
+            ref = (QgsGeometry.fromPointXY(ponto_estrutura) if ponto_estrutura is not None
+                   else geom)
+            via_auto = _via_mais_proxima(layers.get("vias"), ref, RAIO_VIA_ACESSO_M)
+            if via_auto:
+                endereco = endereco.replace("{via}", via_auto)
+                print(f"[info] Via de acesso (automática): {via_auto}")
+            else:
+                endereco = endereco.replace("{via} - ", "").replace("{via}", "")
+                print(f"[aviso] Nenhuma via com nome a até {RAIO_VIA_ACESSO_M:.0f} m: "
+                      "endereço sem via de acesso.")
         if "{municipio}" in endereco:
             if municipio_nome:
                 endereco = endereco.replace("{municipio}", municipio_nome)
@@ -2235,6 +2284,8 @@ def main(argv=None):
             "fonte_geom": fonte_geom,
             "municipio": municipio_nome,
             "endereco": endereco,
+            "via_auto": via_auto,
+            "ponto_origem": ponto_origem,
             "area_total_ha": area_total_ha,
             "area_construida_ha": args.area_construida_ha,
             "area_livre_ha": area_livre_ha,
