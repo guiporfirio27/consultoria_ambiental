@@ -199,7 +199,7 @@ def buscar_ou_criar_pessoa(
     dados_extraidos deve conter pelo menos:
         - 'numero_cpf'      CPF ou CNPJ (string)
         - 'nome_completo'
-        - 'tipo_documento'  ('RG' | 'CNH' | 'CPF' | 'CAR' | 'MAT-IMV' | 'CADPRO' | 'CCIR')
+        - 'tipo_documento'  ('RG' | 'CNH' | 'CPF' | 'CAR' | 'MAT-IMV' | 'CADPRO' | 'CCIR' | 'ADAPAR')
         - 'numero_rg', 'orgao_emissor' (opcionais)
 
     Retorna {'partner_id': int, 'criado': bool}.

@@ -16,7 +16,7 @@ Rotas de gravação:
     conhecido e nem se consulta CPF. Senão, busca por CPF; se não achar, cria
     marcado `pendente_confirmacao`, sem assumir papel.
 
-  IMÓVEL (MAT-IMV, CAR, CADPRO, CCIR) -> x_imovel
+  IMÓVEL (MAT-IMV, CAR, CADPRO, CCIR, ADAPAR) -> x_imovel
     Busca ou cria pelo número do próprio documento (CCIR: código INCRA; se
     não achar, pela matrícula que consta no CCIR). O titular declarado vai
     para `x_titular_documento_id` (campo neutro), NUNCA `x_proprietario_id`:
@@ -79,7 +79,9 @@ CONFIG_IMOVEL = {
             "municipio": "x_municipio",
         },
         "numerico": {"area_ha": "x_area_ha"},
-        "data": {},
+        # Data da certidão: a DLAM exige dominialidade atualizada em 90 dias
+        # (IN IAT 23/2026, art. 13, I).
+        "data": {"data_certidao": "x_matricula_data_certidao"},
     },
     "CAR": {
         "campo_chave_json": "numero_car",
@@ -118,6 +120,26 @@ CONFIG_IMOVEL = {
         "data": {"data_emissao": "x_ccir_data_emissao"},
         "complementar": True,
     },
+    # Certidão de Estabelecimento Rural (ADAPAR) -- incluída em 14/11/2026.
+    # O MCE da IN IAT 23/2026 (Anexo II, IV) quantifica o plantel "de acordo
+    # com" esta certidão. O código do estabelecimento não aparece em nenhum
+    # outro documento, então, quando ele ainda não está em um imóvel, a
+    # certidão é ligada pelo produtor: CPF/CNPJ do titular -> empreendimento
+    # dele -> imóvel. Sem esse caminho, NÃO cria imóvel novo (seria um imóvel
+    # órfão): vai para a fila de confirmação.
+    "ADAPAR": {
+        "campo_chave_json": "codigo_estabelecimento",
+        "campo_chave_odoo": "x_adapar_codigo",
+        "texto": {
+            "denominacao": "x_denominacao",
+            "plantel_bovinos": "x_adapar_plantel",
+        },
+        "numerico": {"total_bovinos": "x_adapar_bovinos_total"},
+        "data": {"data_emissao": "x_adapar_data_emissao"},
+        "complementar": True,
+        "busca_pelo_titular": True,
+        "nao_cria": True,
+    },
 }
 
 TIPOS_PESSOA = ("RG", "CNH", "CPF")
@@ -151,6 +173,18 @@ CAMPOS_ATUALIZAVEIS = {
     "x_ccir_modulos_fiscais",
     "x_ccir_classificacao_fundiaria",
     "x_ccir_data_emissao",
+    # Certidão de matrícula e certidão da ADAPAR: a mais nova substitui.
+    "x_matricula_data_certidao",
+    "x_adapar_data_emissao",
+    "x_adapar_bovinos_total",
+    "x_adapar_plantel",
+}
+
+# Atualizáveis em que a mudança é esperada e não interessa revisar: a data de
+# uma certidão nova sempre substitui a da anterior. Atualiza sem abrir pendência.
+CAMPOS_ATUALIZACAO_SILENCIOSA = {
+    "x_matricula_data_certidao",
+    "x_adapar_data_emissao",
 }
 
 
@@ -188,7 +222,7 @@ def aplicar_valores(modelo: str, registro_id: int, valores: dict,
 
         if campo in CAMPOS_ATUALIZAVEIS:
             aplicar[campo] = novo
-            if not complementar:
+            if not complementar and campo not in CAMPOS_ATUALIZACAO_SILENCIOSA:
                 divergencias.append(
                     f"{campo}: atualizado de '{antigo}' para '{novo}'")
         elif complementar:
@@ -378,17 +412,42 @@ def gravar_imovel(resultado: dict) -> int | None:
             alvo = ids[0]
             print(f"[ok] {tipo} ligado ao imóvel {alvo} pela {alternativa[0]}")
 
+    if not alvo and config.get("busca_pelo_titular") and campos.get("documento_titular"):
+        alvo = imovel_pelo_titular(campos["documento_titular"])
+        if alvo:
+            print(f"[ok] {tipo} ligado ao imóvel {alvo} pelo produtor titular")
+
     if alvo:
         _, divergencias = aplicar_valores("x_imovel", alvo, valores,
                                           complementar=complementar)
         resultado["_divergencias"] = divergencias
         return alvo
 
+    if config.get("nao_cria"):
+        resultado["_motivo"] = (f"{tipo}: não foi possível ligar a um imóvel (nem pelo código, "
+                                "nem pelo produtor). Escolha o Imóvel e confirme.")
+        return None
+
     valores["x_name"] = numero_chave
     # create recebe o dict direto: passar [valores] devolveria uma LISTA de ids.
     novo_id = _executar(models, uid, "x_imovel", "create", valores)
     print(f"[ok] x_imovel {novo_id} criado ({tipo} {numero_chave})")
     return novo_id
+
+
+def imovel_pelo_titular(documento: str) -> int | None:
+    """Imóvel do único empreendimento do produtor com este CPF/CNPJ.
+    Ambíguo (vários imóveis) ou inexistente -> None: quem decide é você."""
+    pessoas = _executar(models, uid, "res.partner", "search",
+                        [["company_id", "in", [2, False]],
+                         ["vat", "in", [documento, so_digitos(documento)]]])
+    if not pessoas:
+        return None
+    emps = _executar(models, uid, "x_empreendimento", "search_read",
+                     [["x_empreendedor_id", "in", pessoas], ["x_imovel_id", "!=", False]],
+                     fields=["x_imovel_id"])
+    imoveis = {e["x_imovel_id"][0] for e in emps}
+    return imoveis.pop() if len(imoveis) == 1 else None
 
 
 def resolver_pessoa(resultado: dict) -> int | None:
@@ -427,6 +486,8 @@ def tratar_automatico(resultado: dict, caminho_arquivo: str) -> str | None:
     # ------------------------------------------------------------ IMÓVEL
     if tipo in CONFIG_IMOVEL:
         imovel_id = gravar_imovel(resultado)
+        if imovel_id is None and resultado.get("_motivo"):
+            return resultado.pop("_motivo")
         if imovel_id is None:
             return (f"Documento de imóvel sem o número identificador "
                     f"({CONFIG_IMOVEL[tipo]['campo_chave_json']}). "
@@ -482,6 +543,19 @@ def tratar_automatico(resultado: dict, caminho_arquivo: str) -> str | None:
     if tipo == "COMP-RES":
         return ("Comprovante de residência: o endereço precisa de conferência "
                 "antes de gravar. Escolha a pessoa e confirme.")
+
+    # Registro fotográfico (IN IAT 23/2026, art. 13, IX): documento à parte,
+    # sem campos a gravar. Vai para o imóvel conhecido pelo contexto (WhatsApp
+    # já sabe de quem é); sem contexto, você escolhe o destino na fila.
+    if tipo == "FOTO":
+        imovel_id = resultado.get("imovel_id")
+        if imovel_id and caminho_arquivo:
+            anexar_arquivo(models, uid, caminho_arquivo, "x_imovel", imovel_id,
+                           partner_id=resultado.get("partner_id"))
+            return None
+        assunto = (campos.get("assunto") or "foto").replace("_", " ")
+        return (f"Foto da atividade ({assunto}) sem imóvel conhecido. "
+                "Escolha o Imóvel e confirme para anexar.")
 
     return f"Tipo '{tipo}' não reconhecido com confiança suficiente."
 
