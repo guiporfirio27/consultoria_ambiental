@@ -86,7 +86,12 @@ nome do arquivo, que você não recebe):
 - CADPRO (comprovante de Cadastro de Produtor Rural)
 - CCIR (Certificado de Cadastro de Imóvel Rural — INCRA/SNCR; traz o código do
   imóvel rural, os titulares com sua condição e os dados de registro/matrícula)
+- ADAPAR (Certidão/Cadastro de Estabelecimento Rural da ADAPAR — Agência de
+  Defesa Agropecuária do Paraná; traz o código do estabelecimento, o produtor e o
+  rebanho/plantel por espécie e categoria)
 - COMP-RES (comprovante de residência — conta de luz, água, telefone, etc.)
+- FOTO (fotografia da propriedade ou da atividade — instalações, animais,
+  esterqueira, lavoura, rio, estrada — e NÃO de um documento em papel)
 - NAO_IDENTIFICADO (não se encaixa em nenhum tipo acima, ou está ilegível)
 
 Não confunda CCIR com recibo do CAR: o CCIR é emitido pelo INCRA, traz
@@ -98,7 +103,7 @@ classifique-as pelo conteúdo, não exija o cabeçalho para reconhecer o tipo.
 
 Responda APENAS com um JSON válido, sem texto antes ou depois:
 
-{"tipo_documento": "RG|CNH|CPF|MAT-IMV|CAR|CADPRO|CCIR|COMP-RES|NAO_IDENTIFICADO", "confianca": 0-100, "motivo": "string curta"}
+{"tipo_documento": "RG|CNH|CPF|MAT-IMV|CAR|CADPRO|CCIR|ADAPAR|COMP-RES|FOTO|NAO_IDENTIFICADO", "confianca": 0-100, "motivo": "string curta"}
 """
 
 PROMPTS_EXTRACAO = {
@@ -112,7 +117,11 @@ Se um campo não estiver legível, retorne null — nunca invente um valor.""",
     "CPF": """Extraia os dados deste comprovante de inscrição no CPF. Responda apenas com JSON:
 {"nome_completo": "string ou null", "numero_cpf": "string ou null", "confianca": 0-100}""",
     "MAT-IMV": """Extraia os dados desta matrícula de imóvel. Responda apenas com JSON:
-{"numero_matricula": "string ou null", "cartorio": "string ou null", "comarca": "string ou null", "municipio": "string ou null", "area_ha": "number ou null", "titular": "string ou null", "documento_titular": "string ou null", "confianca": 0-100}
+{"numero_matricula": "string ou null", "cartorio": "string ou null", "comarca": "string ou null", "municipio": "string ou null", "area_ha": "number ou null", "titular": "string ou null", "documento_titular": "string ou null", "data_certidao": "AAAA-MM-DD ou null", "confianca": 0-100}
+
+Sobre "data_certidao": a data em que o cartório emitiu esta certidão (normalmente
+no fim do documento, junto da assinatura ou do selo). Não é a data de abertura da
+matrícula nem a de um registro. Se não aparecer nesta página, retorne null.
 
 Sobre "titular" e "documento_titular": traga o nome do proprietário atual
 registrado e o CPF ou CNPJ dele, exatamente como aparecem no documento. Se a
@@ -163,6 +172,25 @@ Regras:
 
 Esta pode ser uma página de continuação: extraia só o que estiver visível
 nesta página e retorne null para o resto.""",
+    "ADAPAR": """Extraia os dados desta Certidão/Cadastro de Estabelecimento Rural da ADAPAR. Responda apenas com JSON:
+{"codigo_estabelecimento": "string ou null", "denominacao": "string ou null", "municipio": "string ou null", "titular": "string ou null", "documento_titular": "string ou null", "total_bovinos": "number ou null", "plantel_bovinos": "string ou null", "data_emissao": "AAAA-MM-DD ou null", "confianca": 0-100}
+
+Regras:
+- "codigo_estabelecimento": o código/número do estabelecimento rural na ADAPAR,
+  exatamente como impresso.
+- "denominacao": o nome do estabelecimento (sítio, fazenda, chácara).
+- "titular" e "documento_titular": o produtor/responsável e o CPF ou CNPJ dele,
+  como aparecem. Nunca deduza o CPF a partir do nome.
+- "total_bovinos": soma de todos os bovinos do quadro de rebanho/plantel.
+- "plantel_bovinos": o quadro de bovinos por categoria como texto, uma por
+  linha, ex.: "Vacas: 80\nNovilhas 13-24 meses: 20\nBezerras 0-12 meses: 25".
+  Ignore outras espécies.
+- Campo ilegível ou ausente = null.
+
+Esta pode ser uma página de continuação: extraia só o que estiver visível
+nesta página e retorne null para o resto.""",
+    "FOTO": """Esta é uma foto da propriedade rural ou da atividade (registro fotográfico exigido pela IN IAT 23/2026, art. 13, IX). Responda apenas com JSON:
+{"assunto": "fachada_estrutura|interior_estrutura|sala_leite|esterqueira|area_aplicacao|curso_dagua|acesso|vista_geral|outro", "descricao": "uma frase curta sobre o que aparece", "confianca": 0-100}""",
     "COMP-RES": """Extraia os dados deste comprovante de residência. Responda apenas com JSON:
 {"nome_titular": "string ou null", "logradouro": "string ou null", "numero": "string ou null", "bairro": "string ou null", "municipio": "string ou null", "uf": "string ou null", "cep": "string ou null", "tipo_comprovante": "luz|agua|telefone|outro|null", "data_emissao": "AAAA-MM-DD ou null", "confianca": 0-100}""",
 }
@@ -269,6 +297,7 @@ def chave_identificadora(campos: dict) -> str:
         "documento_titular",
         "numero_car",
         "codigo_imovel_incra",
+        "codigo_estabelecimento",
         "numero_matricula",
         "numero_protocolo",
         "numero_rg",

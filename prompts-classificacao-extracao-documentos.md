@@ -24,13 +24,15 @@ nome do arquivo, que você não recebe):
 - CAR (recibo do Cadastro Ambiental Rural — SICAR)
 - CADPRO (comprovante de Cadastro de Produtor Rural)
 - CCIR (Certificado de Cadastro de Imóvel Rural — INCRA/SNCR)
+- ADAPAR (Certidão de Estabelecimento Rural — ADAPAR)
+- FOTO (foto da propriedade ou da atividade, não de documento)
 - COMP-RES (comprovante de residência — conta de luz, água, telefone, etc.)
 - NAO_IDENTIFICADO (não se encaixa em nenhum tipo acima, ou está ilegível)
 
 Responda APENAS com um JSON válido, sem texto antes ou depois:
 
 {
-  "tipo_documento": "RG | CNH | CPF | MAT-IMV | CAR | CADPRO | CCIR | COMP-RES | NAO_IDENTIFICADO",
+  "tipo_documento": "RG | CNH | CPF | MAT-IMV | CAR | CADPRO | CCIR | ADAPAR | COMP-RES | FOTO | NAO_IDENTIFICADO",
   "confianca": 0-100,
   "motivo": "justificativa breve (máx. 20 palavras) baseada no que está visível na página"
 }
@@ -180,6 +182,34 @@ Gravação (`write_to_odoo.py` e ação 1420 do Odoo):
 | titular + documento_titular | `x_titular_documento_id` | se vazio |
 | condicao_titular = "Proprietário" | `x_proprietario_id` | se vazio |
 | municipio | — | **não grava** (D4) |
+
+### ADAPAR (Certidão de Estabelecimento Rural)
+
+Incluída em 14/11/2026: o MCE da IN IAT 23/2026 (Anexo II, IV) quantifica o
+plantel "de acordo com" esta certidão. Texto exato: `PROMPTS_EXTRACAO["ADAPAR"]`
+em `process_document.py`.
+
+Campos: `codigo_estabelecimento`, `denominacao`, `municipio`, `titular`,
+`documento_titular`, `total_bovinos`, `plantel_bovinos` (texto, uma categoria
+por linha), `data_emissao`.
+
+Gravação em `x_imovel`: `x_adapar_codigo` (chave), `x_adapar_plantel`,
+`x_adapar_bovinos_total`, `x_adapar_data_emissao` (sempre atualizados);
+`x_denominacao` só se vazio; município nunca. Sem o código cadastrado, liga pelo
+produtor (CPF/CNPJ → empreendimento → imóvel); sem isso, NÃO cria imóvel: vai
+para a fila de confirmação.
+
+### FOTO (registro fotográfico)
+
+Incluída em 14/11/2026 (IN IAT 23/2026, art. 13, IX). Extrai só `assunto` e
+`descricao`. Anexada ao Imóvel conhecido pelo contexto do WhatsApp; sem
+contexto, vai para a fila. Modelo para o produtor no projeto:
+`claude/modelo-fotos-dlam-leite.md`.
+
+### MAT-IMV — data da certidão
+
+Desde 14/11/2026 extrai também `data_certidao` → `x_matricula_data_certidao`
+(a DLAM exige dominialidade atualizada em 90 dias, IN 23/2026, art. 13, I).
 
 ### COMP-RES (comprovante de residência)
 ```

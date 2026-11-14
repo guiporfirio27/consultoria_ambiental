@@ -10,6 +10,12 @@
 #     sempre da malha do IAT, gravado pelo gerador do mapa.
 #   - CCIR que declara o titular como PROPRIETÁRIO preenche o Proprietário
 #     do Imóvel, se ainda estiver vazio.
+#
+# Revisão 14/11/2026 (IN IAT 23/2026):
+#   - ADAPAR (Certidão de Estabelecimento Rural): chave x_adapar_codigo; sem
+#     ela, liga pelo produtor titular (CPF/CNPJ -> empreendimento -> imóvel).
+#     Fonte complementar, mas os campos x_adapar_* são sempre atualizados.
+#   - MAT-IMV grava a data da certidão (dominialidade em até 90 dias).
 
 for doc in records:
     if doc.x_status != "aguardando":
@@ -30,7 +36,7 @@ for doc in records:
     alvo_id = False
     nota = ""
 
-    if tipo == "MAT-IMV" or tipo == "CAR" or tipo == "CADPRO" or tipo == "CCIR":
+    if tipo == "MAT-IMV" or tipo == "CAR" or tipo == "CADPRO" or tipo == "CCIR" or tipo == "ADAPAR":
 
         if tipo == "MAT-IMV":
             chave_json = "numero_matricula"
@@ -41,11 +47,14 @@ for doc in records:
         elif tipo == "CCIR":
             chave_json = "codigo_imovel_incra"
             chave_odoo = "x_codigo_incra"
+        elif tipo == "ADAPAR":
+            chave_json = "codigo_estabelecimento"
+            chave_odoo = "x_adapar_codigo"
         else:
             chave_json = "numero_protocolo"
             chave_odoo = "x_numero_cadpro_protocolo"
 
-        complementar = tipo == "CADPRO" or tipo == "CCIR"
+        complementar = tipo == "CADPRO" or tipo == "CCIR" or tipo == "ADAPAR"
         numero = campos.get(chave_json)
         imovel = doc.x_imovel_id
 
@@ -57,6 +66,22 @@ for doc in records:
             imovel = env["x_imovel"].search([("x_numero_matricula", "=", campos["numero_matricula"])], limit=1)
             if imovel:
                 nota = nota + " Imovel encontrado pela matricula do CCIR."
+
+        # ADAPAR: o código do estabelecimento só existe nela. Liga pelo produtor.
+        if not imovel and tipo == "ADAPAR" and campos.get("documento_titular"):
+            digitos_t = ""
+            for caractere in campos["documento_titular"]:
+                if caractere.isdigit():
+                    digitos_t = digitos_t + caractere
+            pessoas_t = env["res.partner"].search([("vat", "in", [campos["documento_titular"], digitos_t])])
+            emps_t = env["x_empreendimento"].search([("x_empreendedor_id", "in", pessoas_t.ids), ("x_imovel_id", "!=", False)])
+            if len(emps_t.mapped("x_imovel_id")) == 1:
+                imovel = emps_t.mapped("x_imovel_id")
+                nota = nota + " Imovel encontrado pelo produtor titular da certidao ADAPAR."
+
+        if not imovel and tipo == "ADAPAR":
+            doc.write({"x_resultado": "Certidao ADAPAR nao ligada a nenhum imovel (nem pelo codigo, nem pelo produtor). Preencha o campo Imovel e confirme de novo."})
+            continue
 
         if not imovel and not numero:
             doc.write({"x_resultado": "Falta o numero do documento e nenhum Imovel foi escolhido. Preencha o campo Imovel, ou acrescente a linha '" + chave_json + " = ...' nos dados extraidos, e confirme de novo."})
@@ -89,6 +114,12 @@ for doc in records:
             if campos.get("classificacao_fundiaria"):
                 valores["x_ccir_classificacao_fundiaria"] = campos["classificacao_fundiaria"]
 
+        if tipo == "ADAPAR":
+            if campos.get("denominacao"):
+                valores["x_denominacao"] = campos["denominacao"]
+            if campos.get("plantel_bovinos"):
+                valores["x_adapar_plantel"] = campos["plantel_bovinos"]
+
         if tipo == "CADPRO":
             if campos.get("localidade"):
                 valores["x_localidade"] = campos["localidade"]
@@ -104,6 +135,8 @@ for doc in records:
         elif tipo == "CCIR":
             numericos.append(["area_total_ha", "x_ccir_area_total_ha"])
             numericos.append(["numero_modulos_fiscais", "x_ccir_modulos_fiscais"])
+        elif tipo == "ADAPAR":
+            numericos.append(["total_bovinos", "x_adapar_bovinos_total"])
 
         for par in numericos:
             bruto_area = campos.get(par[0])
@@ -124,7 +157,10 @@ for doc in records:
                 elif not caractere.isdigit():
                     area_ok = False
             if area_ok:
-                valores[par[1]] = float(texto_area)
+                if par[1] == "x_adapar_bovinos_total":
+                    valores[par[1]] = int(float(texto_area))
+                else:
+                    valores[par[1]] = float(texto_area)
             else:
                 nota = nota + " Valor '" + bruto_area + "' (" + par[0] + ") nao reconhecido, nao gravado."
 
@@ -133,6 +169,10 @@ for doc in records:
             datas.append(["data_emissao", "x_car_data_emissao"])
         elif tipo == "CCIR":
             datas.append(["data_emissao", "x_ccir_data_emissao"])
+        elif tipo == "ADAPAR":
+            datas.append(["data_emissao", "x_adapar_data_emissao"])
+        elif tipo == "MAT-IMV":
+            datas.append(["data_certidao", "x_matricula_data_certidao"])
         for par in datas:
             bruto_data = campos.get(par[0])
             if bruto_data and len(bruto_data) == 10 and bruto_data[4] == "-" and bruto_data[7] == "-":
@@ -148,7 +188,7 @@ for doc in records:
                 ignorados = []
                 filtrados = {}
                 for campo in valores:
-                    if campo.startswith("x_ccir_") or not imovel[campo]:
+                    if campo.startswith("x_ccir_") or campo.startswith("x_adapar_") or not imovel[campo]:
                         filtrados[campo] = valores[campo]
                     elif str(imovel[campo]).strip() != str(valores[campo]).strip():
                         ignorados.append(campo)

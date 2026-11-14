@@ -192,7 +192,8 @@ def _id(m2o):
 def montar_endereco(imovel):
     """Endereço do EMPREENDIMENTO (não do requerente). {municipio} é trocado
     pelo gerador pelo município da malha do IAT (D4)."""
-    partes = [imovel.get("x_denominacao"), imovel.get("x_logradouro"),
+    # Sem via no cadastro, o gerador põe a estrada com nome mais próxima ({via}).
+    partes = [imovel.get("x_denominacao"), imovel.get("x_logradouro") or "{via}",
               imovel.get("x_localidade"), "Zona Rural", "{municipio}/PR"]
     endereco = " - ".join(p.strip() for p in partes if p and str(p).strip())
     cep = normalizar_cep(imovel.get("x_cep"))
@@ -230,7 +231,8 @@ def ler_dados_processo(odoo, processo_id):
     # Coordenada da estrutura principal (anamnese)
     coord = (emp.get("x_coordenada") or "").strip()
     if not coord:
-        pendencias.append("Empreendimento sem coordenada da estrutura principal (anamnese).")
+        avisos.append("Sem localização da estrutura principal: o ponto do mapa será o "
+                      "centro do imóvel no CAR — conferir no satélite.")
     dados["estrutura_coord"] = coord
 
     # Área construída (anamnese, m² → ha)
@@ -247,6 +249,7 @@ def ler_dados_processo(odoo, processo_id):
         pendencias.append("Empreendimento sem Empreendedor.")
     else:
         pessoa = odoo.ler("res.partner", _id(emp["x_empreendedor_id"]), ["name", "vat"])
+        dados["empreendedor_id"] = pessoa["id"]
         dados["cliente"] = (pessoa.get("name") or "").strip()
         vat = pessoa.get("vat") or ""
         if not vat:
@@ -301,7 +304,6 @@ def montar_argv(dados, pasta_gis, saida, margem_m=400, osm=True, qpt=None):
     argv = [
         "--dados-dir", str(pasta_gis),
         "--cod-imovel", dados["cod_imovel"],
-        "--estrutura-coord", dados["estrutura_coord"],
         "--cliente", dados["cliente"],
         "--doc-cliente", dados["doc_cliente"],
         "--endereco", dados["endereco_modelo"],
@@ -312,6 +314,8 @@ def montar_argv(dados, pasta_gis, saida, margem_m=400, osm=True, qpt=None):
         "--rosa-ventos", p("rosa_dos_ventos.svg"),
         "--saida", str(saida),
     ]
+    if dados.get("estrutura_coord"):
+        argv += ["--estrutura-coord", dados["estrutura_coord"]]
     if dados.get("area_construida_m2"):
         argv += ["--area-construida-ha", f"{dados['area_construida_m2'] / 10000:.4f}"]
     if osm:
@@ -358,6 +362,68 @@ def registrar_erro(odoo, processo_id, motivo):
     _postar(odoo, processo_id, f"Mapa de situação NÃO gerado. Motivo: {motivo[:1500]}")
 
 
+# Subpasta do Processo (app Documentos) onde o mapa é fichado. Pode ser
+# trocada no Odoo, sem mexer no código, pelo parâmetro do sistema
+# gp.documentos.subpasta_mapa (início do nome da subpasta, ex.: "03").
+SUBPASTA_MAPA_PADRAO = "01"
+
+
+def _parametro(odoo, chave):
+    r = odoo.call("ir.config_parameter", "search_read", [["key", "=", chave]],
+                  fields=["value"], limit=1)
+    return (r[0].get("value") or "").strip() if r else ""
+
+
+def fichar_no_documentos(odoo, processo_id, anexo_id, nome, partner_id=None):
+    """Põe o mapa no app Documentos, na pasta do PRÓPRIO Processo.
+
+    Anexo (ir.attachment) e app Documentos (documents.document) são coisas
+    diferentes no Odoo: o anexo aparece no histórico do Processo; o app
+    Documentos lê documents.document. Criar a ficha apontando para o anexo não
+    muda o vínculo do anexo com o Processo (confirmado no pipeline de
+    documentos).
+
+    Destino, em ordem:
+      1. subpasta do Processo cujo nome começa com gp.documentos.subpasta_mapa
+         (padrão "01" → "01 - Levantamento e Diagnóstico");
+      2. a pasta do Processo;
+      3. a pasta do parâmetro gp.documentos.pasta_processos.
+    Devolve o nome da pasta, ou None se não houver onde fichar."""
+    pasta = None
+    try:
+        proj = odoo.ler("project.project", processo_id, ["documents_folder_id"])
+        pasta = proj.get("documents_folder_id") or None
+    except Exception:
+        pasta = None
+
+    if pasta:
+        prefixo = _parametro(odoo, "gp.documentos.subpasta_mapa") or SUBPASTA_MAPA_PADRAO
+        sub = odoo.call("documents.document", "search_read",
+                        [["type", "=", "folder"], ["folder_id", "=", pasta[0]],
+                         ["name", "=like", f"{prefixo}%"]],
+                        fields=["name"], limit=1)
+        if sub:
+            pasta = [sub[0]["id"], f"{pasta[1]} / {sub[0]['name']}"]
+    else:
+        reserva = _parametro(odoo, "gp.documentos.pasta_processos")
+        if reserva.isdigit():
+            pasta = [int(reserva), "pasta de Processos"]
+
+    if not pasta:
+        return None
+
+    valores = {"folder_id": pasta[0]}
+    if partner_id:
+        valores["partner_id"] = partner_id
+    ja = odoo.call("documents.document", "search", [["attachment_id", "=", anexo_id]], limit=1)
+    if ja:
+        odoo.call("documents.document", "write", ja, valores)
+    else:
+        valores.update({"name": nome, "attachment_id": anexo_id})
+        odoo.call("documents.document", "create", valores)
+    return pasta[1]
+
+
 def registrar_sucesso(odoo, dados, resultado, pdf, avisos):
     processo_id = dados["processo_id"]
     notas = []
@@ -387,6 +453,18 @@ def registrar_sucesso(odoo, dados, resultado, pdf, avisos):
     if vazios:
         odoo.call("ir.attachment", "unlink", vazios)
 
+    # 1b. Também no app Documentos, na pasta do Processo.
+    try:
+        pasta_docs = fichar_no_documentos(odoo, processo_id, anexo_id, Path(pdf).name,
+                                          dados.get("empreendedor_id"))
+    except Exception as e:  # o anexo já está salvo; não perder o mapa por isso
+        pasta_docs = None
+        notas.append(f"Não foi possível colocar no app Documentos: {e}.")
+    if pasta_docs:
+        notas.append(f"Também no app Documentos: {pasta_docs}.")
+    elif pasta_docs is None and not any("Documentos" in n for n in notas):
+        notas.append("Processo sem pasta no app Documentos: mapa só como anexo.")
+
     # 2. Área livre no Empreendimento (D2)
     if resultado.get("area_livre_ha") is not None and dados.get("empreendimento_id"):
         odoo.call("x_empreendimento", "write", [dados["empreendimento_id"]],
@@ -400,6 +478,20 @@ def registrar_sucesso(odoo, dados, resultado, pdf, avisos):
             odoo.call("x_imovel", "write", [dados["imovel_id"]], {"x_municipio": mun})
             if antigo:
                 notas.append(f"Município corrigido pela malha do IAT: {antigo} → {mun}.")
+
+    # 3b. Via de acesso encontrada automaticamente → Imóvel, se estiver vazio.
+    via = resultado.get("via_auto")
+    if via and dados.get("imovel_id"):
+        atual = odoo.ler("x_imovel", dados["imovel_id"], ["x_logradouro"]).get("x_logradouro")
+        if not atual:
+            odoo.call("x_imovel", "write", [dados["imovel_id"]], {"x_logradouro": via})
+            notas.append(f"Via de acesso obtida da base de vias: {via}.")
+        # O hash passa a refletir o cadastro já com a via gravada; sem isso o
+        # mapa recém-gerado pareceria "desatualizado" na próxima conferência.
+        dados["endereco_modelo"] = dados.get("endereco_modelo", "").replace("{via}", via)
+    if resultado.get("ponto_origem") == "centro_car":
+        notas.append("ATENÇÃO: ponto do mapa = centro do imóvel no CAR (sem localização "
+                     "da estrutura). Conferir no satélite antes do protocolo.")
 
     # 4. Conferência da área do recibo x polígono
     recibo = dados.get("car_area_recibo_ha")
