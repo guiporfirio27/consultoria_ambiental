@@ -30,3 +30,10 @@ exec(open(r"D:\Guilherme\Guilherme\Documentos\Dados GIS\rodar_mapa.py", encoding
 ```
 
 Ao alterar um script aqui, copie para a pasta `Dados GIS` (e vice-versa).
+
+## Versão 3.16 (14/11/2026)
+- Círculo tracejado de **50 m** em volta da estrutura principal (IN 23/2026, Anexo II, entorno; art. 68).
+- **Edificações do OpenStreetMap** dentro do círculo, desenhadas em laranja. Se o OSM não responder ou não tiver casas, o mapa sai do mesmo jeito e o Processo recebe o aviso para conferir no satélite.
+- **Nascentes do IAT** (opcional): qualquer `.gpkg` com "nascente" no nome dentro da pasta de dados, ou `--camada-nascentes`. Desenha o ponto e a APP de 50 m, e informa a distância da estrutura à nascente mais próxima.
+- Esterqueira e casas informadas pelo cliente **não** entram no mapa (decisão de 14/11/2026).
+- `fila_mapas.py`: com o HD externo desconectado, a rodada não mexe em nada e os processos continuam na fila.

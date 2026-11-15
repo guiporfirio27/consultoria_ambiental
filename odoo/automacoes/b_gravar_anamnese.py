@@ -75,7 +75,6 @@ for resp in records.sudo():
     n_emp = int(val.get('num_empregados') or 0)
     rio_txt = esc.get('largura_rio', [''])[0]
     coord = val.get('coord_estrutura') or ''
-    coord_dej = val.get('coord_dejetos') or ''
 
     vals = {}
     if 'estrutura_area_m2' in val:
@@ -102,7 +101,6 @@ for resp in records.sudo():
     if desc:
         estr = (estr + '\n' + desc).strip()
     vals['x_estruturas'] = estr or False
-    vals['x_coord_dejetos'] = coord_dej or False
     vals['x_local_aplicacao_dejeto'] = (val.get('local_aplicacao') or '') or False
     vals['x_anamnese_resumo'] = resumo.strip() or False
     if emp:
@@ -152,13 +150,8 @@ for resp in records.sudo():
     if not coord:
         alertas.append('Sem localização da estrutura principal: o mapa usará o centro do imóvel no CAR '
                        '— conferir no satélite.')
-    if esc.get('tem_concentracao_dejetos', [''])[0] == 'Sim' and not coord_dej:
-        alertas.append('Há local de concentração de dejetos sem localização — necessária para o croqui '
-                       '(IN 23/2026, Anexo II).')
     if esc.get('tem_nascente', [''])[0] == 'Sim':
         alertas.append('Há nascente, açude ou represa: conferir a APP no mapa.')
-    if esc.get('casa_50m', [''])[0] == 'Sim':
-        alertas.append('Casa a menos de 50 m das instalações (IN 23/2026, art. 68, V).')
 
     texto_alertas = ''
     for a in alertas:

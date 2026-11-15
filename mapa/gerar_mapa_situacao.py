@@ -165,6 +165,8 @@ _GRADE_MOSTRAR_TUDO = _enum("Qgis.MapGridComponentVisibility.ShowAll", f"{_G}.Di
 _FIGURA_ZOOM = _enum("QgsLayoutItemPicture.ResizeMode.Zoom", "QgsLayoutItemPicture.Zoom")
 _FORMA_ELIPSE = _enum("QgsLayoutItemShape.Shape.Ellipse", "QgsLayoutItemShape.Ellipse")
 _FORMA_RETANGULO = _enum("QgsLayoutItemShape.Shape.Rectangle", "QgsLayoutItemShape.Rectangle")
+_GEOM_PONTO = _enum("Qgis.GeometryType.Point", "QgsWkbTypes.GeometryType.PointGeometry",
+                    "QgsWkbTypes.PointGeometry")
 
 _LBL_LINHA = _enum("Qgis.LabelPlacement.Line", "QgsPalLayerSettings.Placement.Line", "QgsPalLayerSettings.Line")
 _LBL_SOBRE_PONTO = _enum("Qgis.LabelPlacement.OverPoint", "QgsPalLayerSettings.Placement.OverPoint",
@@ -204,7 +206,7 @@ except (ImportError, AttributeError):
 # de feições em Python e estourar a memória.
 LIMITE_FEICOES_CONTEXTO = 3000
 
-VERSAO = "3.15 (QGIS 3.34+/4.x; via de acesso automática; ponto pelo centro do CAR quando falta a coordenada)"
+VERSAO = "3.16 (QGIS 3.34+/4.x; raio de 50 m da estrutura, edificações do OSM e nascentes do IAT)"
 
 
 # ---------------------------------------------------------------------------
@@ -260,7 +262,14 @@ FONTES_CANDIDATAS = {
     "localidades": ["localidades_pontos.gpkg", "localidades_pontos_osm.gpkg"],
     "municipios": ["municipios_poligonos_iat.gpkg"],
     "vegetacao": ["sicar_vegetacao_nativa.gpkg"],
+    # Nascentes do IAT. Opcional: sem o arquivo o mapa sai do mesmo jeito.
+    # Se o nome não estiver na lista, vale qualquer .gpkg com "nascente" no nome.
+    "nascentes": ["nascentes_pontos_iat.gpkg", "nascentes_iat.gpkg", "nascentes_pontos.gpkg",
+                  "nascentes.gpkg"],
 }
+
+# Camadas que podem faltar sem aviso de erro (o mapa sai sem elas).
+FONTES_OPCIONAIS = ("vegetacao", "nascentes")
 
 # Nome lógico usado como `layername` quando a camada vem do GPKG combinado,
 # e como pista para escolher a sublayer certa dentro de um arquivo.
@@ -271,6 +280,7 @@ NOMES_LOGICOS = {
     "localidades": "localidades_pontos_osm",
     "municipios": "municipios_poligonos_iat",
     "vegetacao": "vegetacao",
+    "nascentes": "nascentes",
 }
 
 # Raio (metros) usado para: (1) buffer do fallback ponto+lat/long,
@@ -455,6 +465,7 @@ LEG_BOX = (205.0, 144.038, 86.0, 26.24)
 LEG_LBL = (206.5, 145.028, 83.0, 4.0)
 LEG_FONTE_PT = 6
 LEG_LINHA_H = 5.08
+LEG_LINHA_H_MIN = 3.3
 LEG_Y0 = 149.528                      # topo do rótulo da 1ª linha
 LEG_COLUNAS = (
     # (x_swatch, x_texto, largura_texto)
@@ -512,6 +523,17 @@ COR_VEG_LINHA = "90,170,100,220"
 COR_ESTRUTURA = "227,26,28,255"
 COR_REFERENCIA = "255,255,0,255"
 COR_COTA = "255,0,255,255"
+
+# Entorno de 50 m da estrutura principal (IN 23/2026, Anexo II, seção II, e
+# distâncias do art. 68): círculo tracejado, sem preenchimento.
+RAIO_ENTORNO_M = 50.0
+COR_ENTORNO = "255,255,255,255"
+# Edificações do OpenStreetMap dentro do raio: só desenhadas, nunca bloqueiam.
+COR_EDIFICACAO = "255,140,0,170"
+COR_EDIFICACAO_LINHA = "255,140,0,255"
+# Nascentes (base do IAT) e a APP de 50 m em volta de cada uma (Lei 12.651, art. 4º, IV).
+COR_NASCENTE = "0,229,255,255"
+APP_NASCENTE_M = 50.0
 
 _REFS_VIVAS = []
 
@@ -750,6 +772,7 @@ def resolver_fontes(args):
         "localidades": args.camada_localidades,
         "municipios": args.camada_municipios,
         "vegetacao": args.vegetacao,
+        "nascentes": getattr(args, "camada_nascentes", None),
     }
 
     base = None
@@ -772,13 +795,20 @@ def resolver_fontes(args):
                     spec, origem = str(candidato), "pasta"
                     break
 
-        if spec is None and args.gpkg and Path(args.gpkg).exists():
+        if spec is None and base is not None and chave == "nascentes" and base.is_dir():
+            achados = sorted(p for p in base.glob("*.gpkg") if "nascente" in p.name.lower())
+            if achados:
+                spec, origem = str(achados[0]), "pasta (nome com 'nascente')"
+
+        if spec is None and args.gpkg and Path(args.gpkg).exists() and chave not in FONTES_OPCIONAIS:
             spec, origem = f"{args.gpkg}|layername={NOMES_LOGICOS[chave]}", "gpkg combinado"
 
         fontes[chave] = spec
         if spec:
             print(f"[info] fonte '{chave}' ({origem}): {spec}")
-        elif chave != "vegetacao":
+        elif chave in FONTES_OPCIONAIS:
+            print(f"[info] fonte opcional '{chave}' não encontrada: o mapa sai sem ela.")
+        else:
             print(f"[aviso] fonte '{chave}': não encontrada. Procurei por "
                   f"{', '.join(FONTES_CANDIDATAS[chave])} em "
                   f"{base if base else '(nenhuma pasta informada)'}.")
@@ -1031,6 +1061,44 @@ def montar_camadas(fontes, geom_empreendimento, extent, fonte_geom,
             metricas["dist_hidrica_m"] = dist_m
             metricas["hidrica_nome"] = nome_rio
 
+        # --- Entorno de 50 m da estrutura principal ---
+        circ = QgsVectorLayer("Polygon?crs=" + CRS_MAPA, f"Raio de {RAIO_ENTORNO_M:.0f} m", "memory")
+        circ.dataProvider().addFeature(_feature(QgsGeometry.fromPointXY(ponto_estrutura).buffer(RAIO_ENTORNO_M, 48)))
+        circ.updateExtents()
+        circ.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple(_props_entorno())))
+        layers["entorno"] = circ
+        metricas["raio_entorno_m"] = RAIO_ENTORNO_M
+
+        # --- Edificações do OSM dentro do raio (nunca bloqueia o mapa) ---
+        if buscar_osm:
+            try:
+                edifs, ok = _buscar_edificacoes_osm(ponto_estrutura, RAIO_ENTORNO_M,
+                                                    min(osm_timeout, 25), osm_url)
+            except Exception as e:  # qualquer surpresa: segue sem edificações
+                print(f"[aviso] Edificações OSM: falha inesperada ({e}).")
+                edifs, ok = [], False
+            metricas["edificacoes_osm_ok"] = ok
+            metricas["edificacoes_50m"] = len(edifs)
+            if edifs:
+                ed = QgsVectorLayer("Polygon?crs=" + CRS_MAPA, "Edificações (OSM)", "memory")
+                ed.dataProvider().addFeatures([_feature(g) for g in edifs])
+                ed.updateExtents()
+                ed.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple(_props_edificacao())))
+                layers["edificacoes"] = ed
+
+    # --- Nascentes (base do IAT, opcional) ---
+    if fontes.get("nascentes"):
+        try:
+            nasc, app_nasc, dist_n, qtd_n = _carregar_nascentes(fontes["nascentes"], extent, ponto_estrutura)
+        except Exception as e:
+            print(f"[aviso] Nascentes: falha ao carregar ({e}) — o mapa segue sem elas.")
+            nasc, app_nasc, dist_n, qtd_n = None, None, None, 0
+        if nasc is not None:
+            layers["nascentes"] = nasc
+            layers["app_nascentes"] = app_nasc
+            metricas["nascentes_qtd"] = qtd_n
+            metricas["dist_nascente_m"] = dist_n
+
     return {k: v for k, v in layers.items() if v is not None}, metricas
 
 
@@ -1121,6 +1189,132 @@ out center {LIMITE_REFERENCIAS_OSM};"""
     return achados
 
 
+def _buscar_edificacoes_osm(ponto, raio_m, timeout=25, url=OVERPASS_URL):
+    """
+    Edificações (building=*) do OpenStreetMap a até `raio_m` do ponto da
+    estrutura principal. Retorna (lista de QgsGeometry em CRS_MAPA, ok).
+    `ok` = False quando a consulta falhou (rede, servidor ocupado): o mapa
+    segue sem as edificações e o Odoo recebe o aviso para conferir no satélite.
+    Na zona rural do Paraná o OSM tem poucas casas desenhadas; lista vazia
+    com ok = True quer dizer "nada no OSM", não "não há casas".
+    """
+    import json
+    import urllib.parse
+    import urllib.request
+
+    para_wgs = QgsCoordinateTransform(
+        _crs_mapa(), QgsCoordinateReferenceSystem("EPSG:4326"), QgsProject.instance())
+    de_wgs = QgsCoordinateTransform(
+        QgsCoordinateReferenceSystem("EPSG:4326"), _crs_mapa(), QgsProject.instance())
+    try:
+        p = QgsGeometry.fromPointXY(ponto)
+        p.transform(para_wgs)
+        lon, lat = p.asPoint().x(), p.asPoint().y()
+    except Exception as e:
+        print(f"[aviso] Edificações OSM: ponto não convertido ({e}).")
+        return [], False
+
+    # Busca um pouco além do raio: a casa conta se QUALQUER parte dela estiver
+    # dentro dos 50 m, e o "around" da Overpass mede até o nó mais próximo.
+    consulta = f"""[out:json][timeout:{int(timeout)}];
+(
+  way["building"](around:{raio_m + 40:.0f},{lat:.7f},{lon:.7f});
+  node["building"](around:{raio_m:.0f},{lat:.7f},{lon:.7f});
+);
+out geom 200;"""
+    try:
+        req = urllib.request.Request(
+            url, data=urllib.parse.urlencode({"data": consulta}).encode("utf-8"),
+            headers={"User-Agent": "GP-Consultoria-Ambiental/mapa-situacao (QGIS)"})
+        with urllib.request.urlopen(req, timeout=timeout + 10) as resp:
+            dados = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        print(f"[aviso] Edificações OSM indisponíveis ({e}) — o mapa segue sem elas.")
+        return [], False
+
+    centro = QgsGeometry.fromPointXY(ponto)
+    geoms = []
+    for el in dados.get("elements", []):
+        try:
+            if el.get("type") == "way" and el.get("geometry"):
+                anel = [QgsPointXY(float(v["lon"]), float(v["lat"])) for v in el["geometry"]]
+                if len(anel) < 3:
+                    continue
+                g = QgsGeometry.fromPolygonXY([anel])
+            elif el.get("type") == "node":
+                # Casa marcada só como ponto: vira um quadrado de 8 m para aparecer no papel.
+                g = QgsGeometry.fromPointXY(QgsPointXY(float(el["lon"]), float(el["lat"])))
+            else:
+                continue
+            g.transform(de_wgs)
+            if g.type() == _GEOM_PONTO:
+                g = g.buffer(4.0, 1)
+            if g.distance(centro) <= raio_m:
+                geoms.append(g)
+        except Exception:
+            continue
+    print(f"[info] Edificações OSM a até {raio_m:.0f} m da estrutura: {len(geoms)}.")
+    return geoms, True
+
+
+def _carregar_nascentes(spec, extent, ponto_ref=None):
+    """
+    Nascentes da base do IAT dentro do quadro do mapa. Aceita ponto ou
+    multiponto (e, por segurança, polígono: usa o ponto interno).
+    Retorna (camada de pontos, camada da APP de 50 m, distância da estrutura
+    à nascente mais próxima em m, quantidade) — (None, None, None, 0) se não houver.
+    """
+    origem = _abrir_camada(spec, "Nascentes", NOMES_LOGICOS["nascentes"])
+    if origem is None or not origem.isValid():
+        print("[aviso] Nascentes: a camada não carregou — o mapa segue sem ela.")
+        return None, None, None, 0
+    para_mapa = QgsCoordinateTransform(origem.crs(), _crs_mapa(), QgsProject.instance())
+    para_origem = QgsCoordinateTransform(_crs_mapa(), origem.crs(), QgsProject.instance())
+    req = QgsFeatureRequest()
+    req.setFilterRect(para_origem.transformBoundingBox(extensao_com_folga_relativa(extent, 0.1)))
+    req.setSubsetOfAttributes([])
+    req.setLimit(LIMITE_FEICOES_CONTEXTO)
+
+    pontos = []
+    for f in origem.getFeatures(req):
+        g = QgsGeometry(f.geometry())
+        if g is None or g.isEmpty():
+            continue
+        g.transform(para_mapa)
+        if g.type() != _GEOM_PONTO:
+            g = g.pointOnSurface()
+        partes = g.asGeometryCollection() if g.isMultipart() else [g]
+        for parte in partes:
+            pt = parte.asPoint()
+            if extent.contains(pt):
+                pontos.append(pt)
+    if not pontos:
+        print("[info] Nenhuma nascente da base do IAT no quadro do mapa.")
+        return None, None, None, 0
+
+    lyr = QgsVectorLayer("Point?crs=" + CRS_MAPA, "Nascentes", "memory")
+    lyr.dataProvider().addFeatures([_feature(QgsGeometry.fromPointXY(p)) for p in pontos])
+    lyr.updateExtents()
+    lyr.setRenderer(QgsSingleSymbolRenderer(QgsMarkerSymbol.createSimple({
+        "name": "circle", "color": COR_NASCENTE,
+        "outline_color": "0,60,120,255", "outline_width": "0.3", "size": "2.2",
+    })))
+
+    uniao = QgsGeometry.unaryUnion([QgsGeometry.fromPointXY(p).buffer(APP_NASCENTE_M, 24) for p in pontos])
+    app = QgsVectorLayer("Polygon?crs=" + CRS_MAPA, f"APP de nascente ({APP_NASCENTE_M:.0f} m)", "memory")
+    app.dataProvider().addFeature(_feature(uniao))
+    app.updateExtents()
+    app.setRenderer(QgsSingleSymbolRenderer(QgsFillSymbol.createSimple(_props_app())))
+
+    dist = None
+    if ponto_ref is not None:
+        ref = QgsGeometry.fromPointXY(ponto_ref)
+        dist = min(ref.distance(QgsGeometry.fromPointXY(p)) for p in pontos)
+    print(f"[info] Nascentes no quadro: {len(pontos)}"
+          + (f"; a mais próxima a {dist:,.0f} m da estrutura." if dist is not None else "."))
+    return lyr, app, dist, len(pontos)
+
+
 def _mesclar_referencias(layer, achados, dist_min=60.0):
     """
     Junta os pontos da Overpass à camada de referências já montada do arquivo
@@ -1177,6 +1371,15 @@ def _mesclar_referencias(layer, achados, dist_min=60.0):
 def _props_app():
     """Símbolo da APP: mancha azul translúcida, borda discreta."""
     return {"color": COR_APP, "outline_color": COR_APP_LINHA, "outline_width": "0.15"}
+
+
+def _props_entorno():
+    return {"color": "0,0,0,0", "outline_color": COR_ENTORNO, "outline_width": "0.45",
+            "outline_style": "dash"}
+
+
+def _props_edificacao():
+    return {"color": COR_EDIFICACAO, "outline_color": COR_EDIFICACAO_LINHA, "outline_width": "0.3"}
 
 
 def _props_veg():
@@ -1519,8 +1722,9 @@ def montar_layout(project, layers, extent, dados_cliente, logo_path, fonte_geom,
     # deixando o perímetro legível de ponta a ponta — antes ele era cortado
     # nos pontos em que uma estrada ou um córrego atravessava a divisa.
     ordem = []
-    for chave in ("estrutura", "cota_hidrica", "referencias", "empreendimento", "vias",
-                  "hidrografia", "app", "vegetacao", "basemap"):
+    for chave in ("estrutura", "cota_hidrica", "entorno", "edificacoes", "nascentes",
+                  "referencias", "empreendimento", "vias", "hidrografia", "app",
+                  "app_nascentes", "vegetacao", "basemap"):
         if chave in layers and layers[chave] is not None:
             ordem.append(layers[chave])
     mapa.setLayers(ordem)
@@ -1648,6 +1852,16 @@ def _montar_legenda(layout, layers, metricas):
     if "estrutura" in layers:
         entradas.append(((metricas or {}).get("rotulo_ponto", "Estrutura física"), "ponto",
                          {"color": COR_ESTRUTURA, "outline_color": "255,255,255,255", "outline_width": "0.3"}))
+    if "entorno" in layers:
+        # No mapa o círculo é branco (contraste com o satélite); na legenda, de
+        # fundo branco, a mesma linha tracejada vai em cinza-escuro para aparecer.
+        leg_entorno = dict(_props_entorno(), outline_color="60,60,60,255")
+        entradas.append((f"Raio de {RAIO_ENTORNO_M:.0f} m da estrutura", "area", leg_entorno))
+    if "edificacoes" in layers:
+        entradas.append(("Edificações (OSM)", "area", _props_edificacao()))
+    if "nascentes" in layers:
+        entradas.append((f"Nascente e APP ({APP_NASCENTE_M:.0f} m)", "ponto",
+                         {"color": COR_NASCENTE, "outline_color": "0,60,120,255", "outline_width": "0.3"}))
     if "vegetacao" in layers:
         entradas.append((rotulo_veg, "area", _props_veg()))
     if "app" in layers:
@@ -1667,7 +1881,14 @@ def _montar_legenda(layout, layers, metricas):
 
     # Distribui em 2 colunas, preenchendo a primeira antes da segunda.
     por_coluna = -(-len(entradas) // len(LEG_COLUNAS))  # teto da divisão
-    max_linhas = int((LEG_BOX[3] - 5.9) // LEG_LINHA_H)
+    # Com o raio de 50 m, as edificações e as nascentes a legenda passa de 8
+    # entradas: a altura da linha encolhe (até LEG_LINHA_H_MIN) em vez de
+    # cortar itens. Fonte de 6 pt mede ~2,1 mm, então 3,3 mm ainda respira.
+    linha_h = LEG_LINHA_H
+    disponivel = LEG_BOX[3] - 5.9
+    if por_coluna * linha_h > disponivel:
+        linha_h = max(LEG_LINHA_H_MIN, disponivel / por_coluna)
+    max_linhas = int(disponivel / linha_h + 1e-6)
     if por_coluna > max_linhas:
         print(f"[aviso] A legenda tem {len(entradas)} entradas e só cabem "
               f"{max_linhas * len(LEG_COLUNAS)} na caixa atual. As excedentes não serão desenhadas.")
@@ -1678,7 +1899,7 @@ def _montar_legenda(layout, layers, metricas):
         if col >= len(LEG_COLUNAS):
             break
         x_swatch, x_texto, w_texto = LEG_COLUNAS[col]
-        y_rotulo = LEG_Y0 + linha * LEG_LINHA_H
+        y_rotulo = LEG_Y0 + linha * linha_h
 
         if tipo == "linha":
             h_sw = 2.0
@@ -1686,7 +1907,8 @@ def _montar_legenda(layout, layers, metricas):
             h_sw = 2.6
         else:
             h_sw = 3.5
-        y_sw = y_rotulo + (LEG_LINHA_H - h_sw) / 2
+        h_sw = min(h_sw, linha_h - 0.6)
+        y_sw = y_rotulo + (linha_h - h_sw) / 2
         w_sw = 2.6 if tipo == "ponto" else LEG_SWATCH_W
         x_sw = x_swatch + (LEG_SWATCH_W - w_sw) / 2 if tipo == "ponto" else x_swatch
 
@@ -1696,7 +1918,7 @@ def _montar_legenda(layout, layers, metricas):
         sw.setSymbol(QgsFillSymbol.createSimple(props))
         layout.addLayoutItem(sw)
 
-        _add_label(layout, texto, x_texto, y_rotulo, w_texto, LEG_LINHA_H,
+        _add_label(layout, texto, x_texto, y_rotulo, w_texto, linha_h,
                    tamanho=LEG_FONTE_PT, familia=FONTE_BASE,
                    alinhamento="esquerda", valinhamento="centro")
 
@@ -2006,6 +2228,8 @@ def main(argv=None):
     ap.add_argument("--camada-hidrografia", default=None, help="Sobrescreve a fonte da hidrografia")
     ap.add_argument("--camada-localidades", default=None, help="Sobrescreve a fonte das localidades")
     ap.add_argument("--camada-municipios", default=None, help="Sobrescreve a fonte dos municípios")
+    ap.add_argument("--camada-nascentes", default=None,
+                    help="Sobrescreve a fonte das nascentes do IAT (opcional)")
     ap.add_argument("--cod-imovel", default=None, help="Código do imóvel no CAR (cod_imovel)")
     ap.add_argument("--lat", type=float, default=None, help="Latitude do empreendimento")
     ap.add_argument("--lon", type=float, default=None, help="Longitude do empreendimento")
@@ -2293,6 +2517,11 @@ def main(argv=None):
             "utm_n": utm_n,
             "vegetacao_ha": metricas.get("vegetacao_ha"),
             "dist_hidrica_m": metricas.get("dist_hidrica_m"),
+            "raio_entorno_m": metricas.get("raio_entorno_m"),
+            "edificacoes_osm_ok": metricas.get("edificacoes_osm_ok"),
+            "edificacoes_50m": metricas.get("edificacoes_50m"),
+            "nascentes_qtd": metricas.get("nascentes_qtd"),
+            "dist_nascente_m": metricas.get("dist_nascente_m"),
         }
 
     finally:
