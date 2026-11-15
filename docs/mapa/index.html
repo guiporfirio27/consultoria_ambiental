@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Marcar a propriedade — GP Consultoria Ambiental</title>
+<meta name="robots" content="noindex">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+  :root {
+    --verde: #1a3d2b; --verde2: #2d6a4f; --claro: #e8f5e9; --texto: #1a1a1a;
+    --cinza: #6b7280; --fundo: #ffffff; --alerta: #b45309;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+               color: var(--texto); background: var(--fundo); }
+  body { display: flex; flex-direction: column; }
+  header { background: linear-gradient(135deg, var(--verde), var(--verde2)); color: #fff; padding: 12px 16px; }
+  header h1 { margin: 0; font-size: 17px; font-weight: 700; }
+  header p { margin: 4px 0 0; font-size: 13.5px; line-height: 1.35; color: rgba(255,255,255,.88); }
+  #busca { display: flex; gap: 6px; padding: 8px 16px; background: #f6f7f6; border-bottom: 1px solid #e5e7eb; }
+  #busca input { flex: 1; min-width: 0; font-size: 16px; padding: 9px 11px; border: 1px solid #cfd4cf; border-radius: 9px; }
+  #busca button { font-size: 15px; padding: 9px 13px; border: 0; border-radius: 9px; background: var(--verde2); color: #fff; }
+  #mapa { flex: 1; min-height: 260px; }
+  #resultados { position: absolute; z-index: 1000; left: 16px; right: 16px; top: 4px; background: #fff;
+                border-radius: 10px; box-shadow: 0 4px 18px rgba(0,0,0,.18); max-height: 45vh; overflow: auto; display: none; }
+  #resultados div { padding: 11px 13px; font-size: 14px; border-bottom: 1px solid #eef0ee; cursor: pointer; }
+  #resultados div:last-child { border-bottom: 0; }
+  .area-mapa { position: relative; flex: 1; display: flex; flex-direction: column; }
+  footer { padding: 10px 16px calc(10px + env(safe-area-inset-bottom)); border-top: 1px solid #e5e7eb; background: #fff; }
+  #status { font-size: 14px; margin: 0 0 8px; min-height: 19px; color: var(--cinza); }
+  #status.ok { color: var(--verde2); font-weight: 600; }
+  #status.erro { color: var(--alerta); font-weight: 600; }
+  .botoes { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .botoes button { font-size: 15.5px; padding: 13px 10px; border-radius: 11px; border: 2px solid var(--verde2);
+                   background: #fff; color: var(--verde); font-weight: 600; }
+  #confirmar { grid-column: 1 / -1; background: var(--verde2); color: #fff; border-color: var(--verde2); font-size: 17px; }
+  #confirmar:disabled { opacity: .45; }
+  #pular { border-color: #cfd4cf; color: var(--cinza); font-weight: 500; }
+  #copiar { display: none; }
+  .leaflet-control-attribution { font-size: 9px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Onde fica a sua atividade leiteira?</h1>
+  <p>Toque no mapa em cima da <b>sala de ordenha</b> ou do <b>barracão das vacas</b>. Se você estiver lá agora, use o botão “Estou na propriedade”.</p>
+</header>
+
+<form id="busca" autocomplete="off">
+  <input id="q" type="search" placeholder="Buscar comunidade, estrada ou cidade" aria-label="Buscar lugar">
+  <button type="submit">Buscar</button>
+</form>
+
+<div class="area-mapa">
+  <div id="resultados" role="listbox"></div>
+  <div id="mapa" aria-label="Mapa de satélite"></div>
+</div>
+
+<footer>
+  <p id="status">Nenhum ponto marcado ainda.</p>
+  <div class="botoes">
+    <button id="gps" type="button">📍 Estou na propriedade</button>
+    <button id="pular" type="button">Pular esta etapa</button>
+    <button id="confirmar" type="button" disabled>Confirmar este local</button>
+    <button id="copiar" type="button">Copiar coordenadas</button>
+  </div>
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+// Página do mapa da anamnese — GP Consultoria Ambiental.
+// O link pessoal (enviado pelo Odoo) traz:
+//   t = código da resposta da anamnese do cliente
+//   s = código da anamnese (para seguir para o questionário depois)
+//   c = (opcional) "lat,lon" para abrir o mapa já perto do imóvel
+// Ao confirmar, a coordenada vai direto para o Odoo (automação por webhook,
+// que só aceita se o código t for de uma anamnese existente) e o cliente
+// segue para o questionário. Sem t, a página só mostra a coordenada para copiar.
+var ODOO = "https://gp-construcaoengenharia.odoo.com";
+var WEBHOOK = ODOO + "/web/hook/c55a184f-5cd9-4c4d-96a7-04fdfd7f263a";
+var PR_CAIXA = [[-26.75, -54.65], [-22.5, -48.0]];   // Paraná
+
+var qs = new URLSearchParams(location.search);
+var token = qs.get("t") || "";
+var survey = qs.get("s") || "";
+var linkAnamnese = (token && survey) ? ODOO + "/survey/start/" + encodeURIComponent(survey) +
+                   "?answer_token=" + encodeURIComponent(token) : "";
+
+var statusEl = document.getElementById("status");
+var btnConfirmar = document.getElementById("confirmar");
+var btnCopiar = document.getElementById("copiar");
+var btnPular = document.getElementById("pular");
+if (!token) {                     // aberto sem link pessoal: só copiar
+  btnConfirmar.style.display = "none";
+  btnPular.style.display = "none";
+  btnCopiar.style.display = "block";
+  btnCopiar.style.gridColumn = "1 / -1";
+  btnCopiar.disabled = true;
+}
+if (!linkAnamnese) btnPular.style.display = "none";
+
+function status(txt, tipo) { statusEl.textContent = txt; statusEl.className = tipo || ""; }
+
+var mapa = L.map("mapa", { zoomControl: true, tap: true });
+L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
+  maxZoom: 19, attribution: "Imagens © Esri, Maxar, Earthstar Geographics"
+}).addTo(mapa);
+L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}", {
+  maxZoom: 19, opacity: 0.85
+}).addTo(mapa);
+L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}", {
+  maxZoom: 19, opacity: 0.6
+}).addTo(mapa);
+
+var inicio = (qs.get("c") || "").split(",").map(parseFloat);
+if (inicio.length === 2 && !isNaN(inicio[0]) && !isNaN(inicio[1])) mapa.setView(inicio, 15);
+else mapa.fitBounds(PR_CAIXA);
+
+var marcador = null, origem = "clique";
+function marcar(latlng, de) {
+  origem = de;
+  if (!marcador) {
+    marcador = L.marker(latlng, { draggable: true }).addTo(mapa);
+    marcador.on("dragend", function () { marcar(marcador.getLatLng(), "clique"); });
+  } else marcador.setLatLng(latlng);
+  var dentro = latlng.lat >= -27 && latlng.lat <= -22.3 && latlng.lng >= -54.9 && latlng.lng <= -47.9;
+  if (!dentro) {
+    status("Esse ponto fica fora do Paraná. Confira o lugar e toque de novo.", "erro");
+    btnConfirmar.disabled = true; btnCopiar.disabled = true; return;
+  }
+  status("Ponto marcado: " + latlng.lat.toFixed(6) + ", " + latlng.lng.toFixed(6) +
+         ". Pode arrastar o alfinete para ajustar.", "");
+  btnConfirmar.disabled = false; btnCopiar.disabled = false;
+}
+mapa.on("click", function (e) { marcar(e.latlng, "clique"); });
+
+document.getElementById("gps").addEventListener("click", function () {
+  if (!navigator.geolocation) { status("Este aparelho não informa a localização. Toque no mapa.", "erro"); return; }
+  status("Procurando a sua localização…");
+  navigator.geolocation.getCurrentPosition(function (p) {
+    var ll = L.latLng(p.coords.latitude, p.coords.longitude);
+    mapa.setView(ll, 18);
+    marcar(ll, "gps");
+    if (p.coords.accuracy > 60)
+      status("Localização aproximada (±" + Math.round(p.coords.accuracy) + " m). Arraste o alfinete até a sala de ordenha.", "");
+  }, function () {
+    status("Não foi possível pegar a localização. Permita o acesso ou toque no mapa.", "erro");
+  }, { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 });
+});
+
+// Busca (OpenStreetMap / Nominatim), limitada ao Paraná.
+var res = document.getElementById("resultados");
+document.getElementById("busca").addEventListener("submit", function (ev) {
+  ev.preventDefault();
+  var q = document.getElementById("q").value.trim();
+  if (!q) return;
+  status("Buscando…");
+  var url = "https://nominatim.openstreetmap.org/search?format=json&limit=6&countrycodes=br&bounded=1" +
+            "&viewbox=-54.65,-22.5,-48.0,-26.75&accept-language=pt-BR&q=" + encodeURIComponent(q);
+  fetch(url).then(function (r) { return r.json(); }).then(function (lista) {
+    res.innerHTML = "";
+    if (!lista.length) { status("Nada encontrado. Tente o nome da cidade.", "erro"); res.style.display = "none"; return; }
+    lista.forEach(function (it) {
+      var d = document.createElement("div");
+      d.textContent = it.display_name;
+      d.addEventListener("click", function () {
+        mapa.setView([parseFloat(it.lat), parseFloat(it.lon)], it.type === "city" || it.type === "administrative" ? 13 : 16);
+        res.style.display = "none";
+        status("Agora aproxime e toque em cima da sala de ordenha ou do barracão.");
+      });
+      res.appendChild(d);
+    });
+    res.style.display = "block";
+    status("Escolha um resultado.");
+  }).catch(function () { status("A busca não respondeu. Mova o mapa com os dedos.", "erro"); });
+});
+
+btnConfirmar.addEventListener("click", function () {
+  if (!marcador) return;
+  var ll = marcador.getLatLng();
+  btnConfirmar.disabled = true;
+  status("Enviando…");
+  // text/plain + no-cors: o navegador não faz pré-verificação e o Odoo lê o JSON.
+  fetch(WEBHOOK, {
+    method: "POST", mode: "no-cors", headers: { "Content-Type": "text/plain" },
+    body: JSON.stringify({ t: token, lat: ll.lat.toFixed(6), lon: ll.lng.toFixed(6), origem: origem })
+  }).then(function () {
+    status("Local enviado! Abrindo o questionário…", "ok");
+    if (linkAnamnese) setTimeout(function () { location.href = linkAnamnese; }, 1500);
+  }).catch(function () {
+    btnConfirmar.disabled = false;
+    status("Sem internet agora. Tente de novo em instantes.", "erro");
+  });
+});
+
+btnPular.addEventListener("click", function () { if (linkAnamnese) location.href = linkAnamnese; });
+
+btnCopiar.addEventListener("click", function () {
+  if (!marcador) return;
+  var ll = marcador.getLatLng();
+  var txt = ll.lat.toFixed(6) + ", " + ll.lng.toFixed(6);
+  (navigator.clipboard ? navigator.clipboard.writeText(txt) : Promise.reject()).then(function () {
+    status("Copiado: " + txt + ". Volte ao questionário e cole no campo da localização.", "ok");
+  }, function () { status("Copie à mão: " + txt, "ok"); });
+});
+</script>
+</body>
+</html>

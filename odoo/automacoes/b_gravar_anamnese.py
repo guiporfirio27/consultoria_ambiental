@@ -74,7 +74,8 @@ for resp in records.sudo():
     trab_txt = esc.get('quem_trabalha', [''])[0]
     n_emp = int(val.get('num_empregados') or 0)
     rio_txt = esc.get('largura_rio', [''])[0]
-    coord = val.get('coord_estrutura') or ''
+    # Ponto marcado na página do mapa vale mais que texto colado na pergunta.
+    coord = resp.x_coord_mapa or val.get('coord_estrutura') or ''
 
     vals = {}
     if 'estrutura_area_m2' in val:
