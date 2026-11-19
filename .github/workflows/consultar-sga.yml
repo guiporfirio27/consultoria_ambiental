@@ -4,6 +4,14 @@ name: Consultar SGA por cliente
 # documentos no minuto 0) e sob demanda pelo botão "Run workflow".
 on:
   workflow_dispatch:
+    inputs:
+      diagnostico:
+        description: "Diagnóstico: listar os NOMES dos campos que o SGA devolve (sem valores)"
+        type: boolean
+        default: false
+      municipio:
+        description: "Código do município no SGA para o diagnóstico (6375 = Nova Tebas)"
+        default: "6375"
   schedule:
     - cron: "20 * * * *"
 
@@ -33,3 +41,5 @@ jobs:
           ODOO_DB: ${{ secrets.ODOO_DB }}
           ODOO_EMAIL: ${{ secrets.ODOO_EMAIL }}
           ODOO_API_KEY: ${{ secrets.ODOO_API_KEY }}
+          SGA_DIAGNOSTICO: ${{ inputs.diagnostico }}
+          SGA_DIAGNOSTICO_MUNICIPIO: ${{ inputs.municipio }}
