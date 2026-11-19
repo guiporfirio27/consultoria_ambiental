@@ -136,12 +136,17 @@ def _dias(dt_str):
 
 
 def _situacao(dias):
+    # Mesmas faixas da varredura regional (90/180/365 dias).
     if dias is None:
         return "sem validade informada"
     if dias < 0:
-        return "VENCIDA"
+        return f"VENCIDA há {abs(dias)} dias"
+    if dias <= 90:
+        return f"vigente, vence em {dias} dias (até 90)"
     if dias <= 180:
-        return f"vigente, vence em {dias} dias"
+        return f"vigente, vence em {dias} dias (até 180)"
+    if dias <= 365:
+        return f"vigente, vence em {dias} dias (até 365)"
     return "vigente"
 
 

@@ -1,0 +1,61 @@
+name: Varredura SGA — oportunidades no CRM
+
+# Semanal (segunda, 09:10 BRT = 12:10 UTC) e sob demanda pelo Run workflow.
+# Varre a região, gera a planilha e cria oportunidades de renovação no CRM.
+on:
+  workflow_dispatch:
+    inputs:
+      municipios:
+        description: "Códigos separados por vírgula (vazio = região padrão; TODOS = Paraná)"
+        default: ""
+      atividade:
+        description: "Filtro de atividade para o CRM (vazio = todas)"
+        default: "bovino"
+      janela_dias:
+        description: "Criar oportunidade para licenças que vencem em até N dias"
+        default: "365"
+      modo:
+        description: "crm (planilha + oportunidades) ou excel (só planilha)"
+        default: "crm"
+  schedule:
+    - cron: "10 12 * * 1"
+
+concurrency:
+  group: varredura-sga-crm
+  cancel-in-progress: false
+
+jobs:
+  varredura:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependências
+        run: pip install requests openpyxl
+
+      # O log não mostra nome nem CPF/CNPJ (o repositório é público).
+      - name: Varrer SGA e criar oportunidades
+        run: python sga/varredura_sga_regiao.py
+        env:
+          ODOO_URL: ${{ secrets.ODOO_URL }}
+          ODOO_DB: ${{ secrets.ODOO_DB }}
+          ODOO_EMAIL: ${{ secrets.ODOO_EMAIL }}
+          ODOO_API_KEY: ${{ secrets.ODOO_API_KEY }}
+          SGA_MUNICIPIOS: ${{ inputs.municipios }}
+          SGA_ATIVIDADE: ${{ inputs.atividade }}
+          SGA_JANELA_DIAS: ${{ inputs.janela_dias }}
+          SGA_MODO: ${{ inputs.modo }}
+
+      - name: Guardar a planilha
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: licencas-regiao
+          path: licencas_*.xlsx
+          retention-days: 30
+          if-no-files-found: ignore
