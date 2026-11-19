@@ -293,6 +293,74 @@ def _rotulos_da_pagina(html):
     return vistos
 
 
+def _chaves(obj, prefixo="", saida=None, nivel=0):
+    """Nomes de chaves de um JSON (aninhado), sem os valores."""
+    saida = [] if saida is None else saida
+    if nivel > 4:
+        return saida
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            nome = prefixo + str(k)
+            if nome not in saida:
+                saida.append(nome)
+            _chaves(v, nome + ".", saida, nivel + 1)
+    elif isinstance(obj, list) and obj:
+        _chaves(obj[0], prefixo.rstrip(".") + "[].", saida, nivel + 1)
+    return saida
+
+
+def _diagnostico_tela(html, proto, get):
+    """A página do protocolo é montada no navegador (ExtJS): os dados vêm de
+    outras chamadas. Mostra o tamanho da página, os rótulos de campo escritos
+    no JavaScript (fieldLabel/header/title — textos fixos da tela, não dados)
+    e as ações do SGA que a página chama; cada ação que devolver JSON com o
+    protocolo tem os NOMES das chaves impressos, sem valores."""
+    print(f"[diagnóstico] página: {len(html)} caracteres, "
+          f"{len(re.findall(r'(?i)<script', html))} bloco(s) de script")
+    rotulos = []
+    for m in re.finditer(r"(?:fieldLabel|header|title|boxLabel)\s*:\s*['\"]([^'\"]{2,45})['\"]", html):
+        t = m.group(1).strip()
+        if t not in rotulos and not re.search(r"\d{3}", t):
+            rotulos.append(t)
+    print(f"[diagnóstico] rótulos da tela (JavaScript): {len(rotulos)}")
+    for r in rotulos:
+        print("   -", r)
+    nomes = list(rotulos)
+    acoes = []
+    for m in re.finditer(r"action=([A-Za-z]{4,60})", html):
+        if m.group(1) not in acoes:
+            acoes.append(m.group(1))
+    print("[diagnóstico] ações chamadas pela página:", ", ".join(acoes) if acoes else "nenhuma")
+    for acao in acoes[:12]:
+        if acao in ("carregarInterfaceInicial", "exibirDadosPublicoLicenca"):
+            continue
+        try:
+            r = get(BASE_URL, params={"action": acao, "numProtocolo": proto, "indSia": "false",
+                                      "_dc": str(int(time.time() * 1000))},
+                    headers=HEADERS, timeout=30)
+            r.encoding = "ISO-8859-1"
+            t = (r.text or "").strip()
+            data = None
+            for tt in (t, _corrigir_json(t)):
+                try:
+                    data = json.loads(tt)
+                    break
+                except ValueError:
+                    continue
+            if data is None:
+                print(f"   ação {acao}: HTTP {r.status_code}, não é JSON ({len(t)} caracteres)")
+                continue
+            ch = _chaves(data)
+            print(f"   ação {acao}: HTTP {r.status_code}, {len(ch)} campo(s):")
+            for c in ch[:80]:
+                print("      ·", c)
+            nomes.extend(ch)
+        except Exception as e:
+            print(f"   ação {acao}: falhou ({type(e).__name__})")
+        time.sleep(0.5)
+    return nomes
+
+
 def diagnostico(municipio, get=requests.get):
     """Consulta UM município (como o varredor do monitor-editais-pr) e imprime
     os nomes dos campos da lista e os rótulos da página pública do 1º
@@ -332,9 +400,10 @@ def diagnostico(municipio, get=requests.get):
           f"{len(rotulos)} rótulo(s):")
     for r in rotulos:
         print("   -", r)
-    palavras = ("telefone", "fone", "celular", "e-mail", "email", "endere", "coorden",
-                "latitude", "longitude", "utm", "respons", "técnico", "tecnico")
-    achou = [r for r in rotulos if any(p in r.lower() for p in palavras)]
+    extra = _diagnostico_tela(pag.text or "", proto, get)
+    palavras = ("telefone", "fone", "celular", "e-mail", "email", "endere", "logradouro",
+                "coorden", "latitude", "longitude", "utm", "respons", "técnico", "tecnico")
+    achou = [r for r in rotulos + extra if any(p in r.lower() for p in palavras)]
     print("[diagnóstico] rótulos de contato/endereço/localização/técnico:",
           ", ".join(achou) if achou else "nenhum")
 
