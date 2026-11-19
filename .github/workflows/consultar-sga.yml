@@ -1,0 +1,35 @@
+name: Consultar SGA por cliente
+
+# De hora em hora (minuto 20, para não coincidir com o processamento de
+# documentos no minuto 0) e sob demanda pelo botão "Run workflow".
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "20 * * * *"
+
+concurrency:
+  group: consultar-sga
+  cancel-in-progress: false
+
+jobs:
+  consultar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependências
+        run: pip install requests
+
+      # O log não mostra nome nem CPF/CNPJ (o repositório é público).
+      - name: Consultar SGA e gravar nos Processos
+        run: python sga/consultar_sga_clientes.py
+        env:
+          ODOO_URL: ${{ secrets.ODOO_URL }}
+          ODOO_DB: ${{ secrets.ODOO_DB }}
+          ODOO_EMAIL: ${{ secrets.ODOO_EMAIL }}
+          ODOO_API_KEY: ${{ secrets.ODOO_API_KEY }}
