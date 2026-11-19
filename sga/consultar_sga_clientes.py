@@ -274,7 +274,74 @@ def processar(odoo, limite=30, get=requests.get, pausa=PAUSA_SEGUNDOS):
     return feitos
 
 
+# --------------------------------------------------------------------------
+# Diagnóstico: quais campos o SGA devolve (só NOMES, nunca valores)
+# --------------------------------------------------------------------------
+
+def _rotulos_da_pagina(html):
+    """Rótulos da página pública do protocolo: textos curtos que terminam em
+    ':' (ex.: 'Endereço:', 'Telefone:'). Valores ficam de fora."""
+    import html as h
+    texto = re.sub(r"(?is)<(script|style).*?</\1>", " ", html or "")
+    pedacos = re.split(r"<[^>]+>", texto)
+    vistos = []
+    for p in pedacos:
+        p = re.sub(r"\s+", " ", h.unescape(p)).strip()
+        if 2 <= len(p) <= 45 and p.endswith(":") and not re.search(r"\d{3}", p):
+            if p not in vistos:
+                vistos.append(p)
+    return vistos
+
+
+def diagnostico(municipio, get=requests.get):
+    """Consulta UM município (como o varredor do monitor-editais-pr) e imprime
+    os nomes dos campos da lista e os rótulos da página pública do 1º
+    protocolo. Não imprime nenhum dado de pessoa."""
+    params = {
+        "action": "consultarProcessoLicenciamento", "_dc": str(int(time.time() * 1000)),
+        "estadoMunicipioCombo": "PR", "municipioCombo": municipio,
+        "numProtocolo": "", "numDocumento": "", "cpfCnpj": "", "nomeRazaoSocial": "",
+        "dtInicial": "", "dtFinal": "", "ckPesquisaAvancada": "on",
+        "page": 1, "start": 0, "limit": 5,
+    }
+    resp = get(BASE_URL, params=params, headers=HEADERS, timeout=40)
+    resp.encoding = "ISO-8859-1"
+    texto = (resp.text or "").strip()
+    data = None
+    for t in (texto, _corrigir_json(texto)):
+        try:
+            data = json.loads(t)
+            break
+        except ValueError:
+            continue
+    if not data or not data.get("listaProcessoLicenciamento"):
+        print("[diagnóstico] a lista do município veio vazia ou ilegível")
+        return
+    item = data["listaProcessoLicenciamento"][0]
+    print("[diagnóstico] campos da LISTA do SGA:")
+    for k in sorted(item):
+        print("   -", k)
+    proto = item.get("numProtocolo")
+    if not proto:
+        print("[diagnóstico] item sem numProtocolo: página pública não consultada")
+        return
+    pag = get(LINK_PUBLICO.format(p=proto), headers=HEADERS, timeout=40)
+    pag.encoding = "ISO-8859-1"
+    rotulos = _rotulos_da_pagina(pag.text)
+    print(f"[diagnóstico] página pública do protocolo: HTTP {pag.status_code}, "
+          f"{len(rotulos)} rótulo(s):")
+    for r in rotulos:
+        print("   -", r)
+    palavras = ("telefone", "fone", "celular", "e-mail", "email", "endere", "coorden",
+                "latitude", "longitude", "utm", "respons", "técnico", "tecnico")
+    achou = [r for r in rotulos if any(p in r.lower() for p in palavras)]
+    print("[diagnóstico] rótulos de contato/endereço/localização/técnico:",
+          ", ".join(achou) if achou else "nenhum")
+
+
 def main():
+    if os.environ.get("SGA_DIAGNOSTICO", "").lower() in ("1", "true", "sim"):
+        diagnostico(os.environ.get("SGA_DIAGNOSTICO_MUNICIPIO") or "6375")
     odoo = Odoo(os.environ["ODOO_URL"], os.environ["ODOO_DB"],
                 os.environ["ODOO_EMAIL"], os.environ["ODOO_API_KEY"])
     processar(odoo, limite=int(os.environ.get("SGA_LIMITE") or 30))
