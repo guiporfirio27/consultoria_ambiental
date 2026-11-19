@@ -15,9 +15,12 @@ ALVO:
   SGA_MUNICIPIOS   códigos separados por vírgula (padrão: região de Campo Mourão
                    e Ivaiporã, os 51 do monitor-editais-pr). "TODOS" = Paraná
                    inteiro (demorado).
-  SGA_ATIVIDADE    filtro de atividade para o CRM (padrão "bovino"); vazio = todas.
-  SGA_JANELA_DIAS  cria oportunidade para licenças que vencem em até N dias,
-                   incluindo as já vencidas há até N dias (padrão 365).
+  SGA_MODALIDADE   id da modalidade no SGA (vazio = todas). Aceita "id — rótulo".
+  SGA_GRUPO        id do grupo de atividade no SGA (vazio = todos).
+  SGA_ATIVIDADE    filtro de texto da atividade para o CRM (padrão "bovino"); vazio = todas.
+  SGA_JANELA_DIAS  oportunidade para licenças que vencem em até N dias (inclui as
+                   vencidas há até N dias). VAZIO = todas as licenças.
+  SGA_DIAG=combos  só lista as modalidades e grupos do SGA (id + texto), para os menus.
 
 CRM (modo crm): ODOO_URL, ODOO_DB, ODOO_EMAIL, ODOO_API_KEY.
 Dedup por protocolo+documento em crm.lead.x_sga_protocolo: cada licença vira no
@@ -241,6 +244,8 @@ def processar_municipio(cod, get=requests.get):
                 "atividade_especifica": item.get("descAtividadeEspecifica", ""),
                 "municipio": item.get("municipioUfFormatado", ""),
                 "modalidade": item.get("siglaModalidade", ""),
+                "id_modalidade": str(item.get("idModalidade", "") or ""),
+                "id_grupo": str(item.get("idGrupoAtividade", "") or ""),
                 "num_documento": item.get("numDocumentoFormatado", ""),
                 "dt_emissao": item.get("dtDecisaoFormatado", ""),
                 "dt_validade": dt_validade,
@@ -325,14 +330,16 @@ def chave_dedup(r):
 
 
 def criar_oportunidades(odoo, registros, janela_dias):
-    """Cria uma oportunidade por licença que vence em até `janela_dias` (ou
-    vencida há até `janela_dias`). Não duplica: pula o que já tem lead com o
-    mesmo x_sga_protocolo. Devolve (criadas, puladas)."""
-    alvo = []
-    for r in registros:
-        d = r.get("dias_para_vencer")
-        if isinstance(d, int) and -janela_dias <= d <= janela_dias:
-            alvo.append(r)
+    """Cria uma oportunidade por licença. `janela_dias=None` inclui todas; um
+    número inclui só as que vencem em até N dias (ou vencidas há até N dias).
+    Não duplica: pula o que já tem lead com o mesmo x_sga_protocolo.
+    Devolve (criadas, puladas)."""
+    if janela_dias is None:
+        alvo = list(registros)
+    else:
+        alvo = [r for r in registros
+                if isinstance(r.get("dias_para_vencer"), int)
+                and -janela_dias <= r["dias_para_vencer"] <= janela_dias]
     if not alvo:
         return 0, 0
 
@@ -351,7 +358,12 @@ def criar_oportunidades(odoo, registros, janela_dias):
             puladas += 1
             continue
         d = r["dias_para_vencer"]
-        quando = (f"vencida há {abs(d)} dias" if d < 0 else f"vence em {d} dias")
+        if not isinstance(d, int):
+            quando = "sem data de validade"
+        elif d < 0:
+            quando = f"vencida há {abs(d)} dias"
+        else:
+            quando = f"vence em {d} dias"
         atividade = r["atividade"]
         if r["atividade_especifica"] and r["atividade_especifica"] != atividade:
             atividade += " — " + r["atividade_especifica"]
@@ -381,6 +393,79 @@ def criar_oportunidades(odoo, registros, janela_dias):
 # Principal
 # --------------------------------------------------------------------------
 
+def diagnostico_combos(get=requests.get):
+    """Descobre no SGA as listas de MODALIDADE e GRUPO DE ATIVIDADE (id + texto
+    exato), para montar os menus do Run workflow. Lê a página inicial da
+    consulta, acha as ações que carregam combos e imprime o conteúdo de cada
+    uma. Só imprime id e rótulo — nenhum dado de pessoa."""
+    print("[combos] lendo a página inicial da consulta…")
+    try:
+        r = get(BASE_URL, params={"action": "carregarInterfaceInicial"}, headers=HEADERS, timeout=40)
+        r.encoding = "ISO-8859-1"
+        html = r.text or ""
+    except Exception as e:
+        print(f"[combos] não li a página inicial ({type(e).__name__})")
+        html = ""
+    acoes = []
+    for m in re.finditer(r"action=([A-Za-z]{4,60})", html):
+        if m.group(1) not in acoes:
+            acoes.append(m.group(1))
+    print(f"[combos] ações referenciadas na página: {', '.join(acoes) or 'nenhuma'}")
+
+    # Candidatas: ações de carga de combo com modalidade/grupo/atividade no nome,
+    # mais alguns nomes prováveis do Struts do SGA.
+    candidatas = [a for a in acoes
+                  if re.search(r"(modalidade|grupo|atividade|combo|listar|carregar)", a, re.I)]
+    for extra in ("listarModalidade", "carregarModalidade", "listarGrupoAtividade",
+                  "carregarGrupoAtividade", "listarGrupo", "carregarComboModalidade",
+                  "carregarComboGrupoAtividade", "consultarModalidade", "consultarGrupoAtividade"):
+        if extra not in candidatas:
+            candidatas.append(extra)
+
+    def imprimir(nome, dados):
+        itens = dados if isinstance(dados, list) else (
+            dados.get("data") or dados.get("rows") or dados.get("lista") or dados.get("results") or [])
+        if not isinstance(itens, list) or not itens:
+            return False
+        print(f"[combos] AÇÃO '{nome}' — {len(itens)} opção(ões):")
+        for it in itens:
+            if not isinstance(it, dict):
+                continue
+            idv = next((it[k] for k in ("id", "value", "idModalidade", "idGrupoAtividade",
+                                        "codigo", "cod") if k in it), "?")
+            txt = next((it[k] for k in ("descricao", "nome", "texto", "label", "sigla",
+                                        "descModalidade", "descGrupoAtividade", "display") if k in it), "?")
+            print(f"     id={idv} | {txt}")
+        return True
+
+    achou = False
+    for nome in candidatas:
+        try:
+            r = get(BASE_URL, params={"action": nome, "_dc": str(int(time.time() * 1000))},
+                    headers=HEADERS, timeout=30)
+            r.encoding = "ISO-8859-1"
+            t = (r.text or "").strip()
+            if not t:
+                continue
+            dados = None
+            for tt in (t, _corrigir_json(t)):
+                try:
+                    dados = json.loads(tt)
+                    break
+                except ValueError:
+                    continue
+            if dados is None:
+                continue
+            if imprimir(nome, dados):
+                achou = True
+        except Exception:
+            pass
+        time.sleep(0.4)
+    if not achou:
+        print("[combos] não consegui ler os combos pelas ações conhecidas. "
+              "Me mande as ações listadas acima que eu ajusto a busca.")
+
+
 def municipios_alvo():
     bruto = (os.environ.get("SGA_MUNICIPIOS") or "").strip()
     if bruto.upper() == "TODOS":
@@ -392,14 +477,33 @@ def municipios_alvo():
     return {c: MUNICIPIOS.get(c, f"Município {c}") for c in cods}
 
 
+def _env(nome):
+    return (os.environ.get(nome) or "").strip()
+
+
 def main():
-    modo = (os.environ.get("SGA_MODO") or "crm").lower()
-    filtro_atv = os.environ.get("SGA_ATIVIDADE", "bovino").strip().lower()
-    janela = int(os.environ.get("SGA_JANELA_DIAS") or 365)
+    # Descoberta das listas do SGA (modalidade e grupo) para montar os menus.
+    if _env("SGA_DIAG").lower() in ("combos", "1", "true", "sim"):
+        diagnostico_combos()
+        return 0
+
+    def so_id(valor):
+        # O menu pode mandar "2 — DLAM (Dispensa)"; usamos só o id (o número).
+        m = re.match(r"\s*(\d+)", valor or "")
+        return m.group(1) if m else ""
+
+    modo = (_env("SGA_MODO") or "crm").lower()
+    filtro_atv = _env("SGA_ATIVIDADE").lower()          # vazio = todas as atividades
+    id_modalidade = so_id(_env("SGA_MODALIDADE"))       # vazio = todas as modalidades
+    id_grupo = so_id(_env("SGA_GRUPO"))                 # vazio = todos os grupos
+    janela_txt = _env("SGA_JANELA_DIAS")
+    janela = int(janela_txt) if janela_txt.isdigit() else None   # vazio = todas as licenças
     municipios = municipios_alvo()
 
     print(f"Varredura SGA — {len(municipios)} município(s), modo={modo}, "
-          f"filtro atividade='{filtro_atv or 'todas'}', janela={janela} dias")
+          f"atividade='{filtro_atv or 'todas'}', modalidade='{id_modalidade or 'todas'}', "
+          f"grupo='{id_grupo or 'todos'}', "
+          f"janela={'todas as licenças' if janela is None else str(janela) + ' dias'}")
 
     todos, erros = [], []
     for i, (cod, nome) in enumerate(municipios.items(), 1):
@@ -414,10 +518,17 @@ def main():
             erros.append(cod)
             time.sleep(3)
 
+    # Filtros escolhidos no Run workflow (modalidade e grupo pelo id do SGA).
+    if id_modalidade:
+        todos = [r for r in todos if r.get("id_modalidade") == id_modalidade]
+    if id_grupo:
+        todos = [r for r in todos if r.get("id_grupo") == id_grupo]
+
     ordem = {"🔴 Vence em até 90 dias": 0, "🟡 Vence em até 180 dias": 1,
              "🟠 Vence em até 365 dias": 2, "Vencida": 3, "🟢 Vigente": 4, "Sem data": 5}
     todos.sort(key=lambda x: ordem.get(x.get("status"), 9))
-    print(f"\nTotal: {len(todos)} licenças" + (f" | erros em {len(erros)} município(s)" if erros else ""))
+    print(f"\nTotal após filtros: {len(todos)} licenças"
+          + (f" | erros em {len(erros)} município(s)" if erros else ""))
 
     hoje = date.today().strftime("%Y%m%d")
     arquivo = f"licencas_regiao_{len(municipios)}mun_{hoje}.xlsx"

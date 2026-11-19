@@ -1,22 +1,43 @@
 name: Varredura SGA — oportunidades no CRM
 
 # Semanal (segunda, 09:10 BRT = 12:10 UTC) e sob demanda pelo Run workflow.
-# Varre a região, gera a planilha e cria oportunidades de renovação no CRM.
+# Varre a região (Campo Mourão e Ivaiporã por padrão), gera a planilha e cria
+# oportunidades de renovação no CRM.
 on:
   workflow_dispatch:
     inputs:
-      municipios:
-        description: "Códigos separados por vírgula (vazio = região padrão; TODOS = Paraná)"
-        default: ""
+      modo:
+        description: "O que fazer"
+        type: choice
+        default: "crm"
+        options:
+          - "crm"      # gera a planilha E cria oportunidades no CRM
+          - "excel"    # só gera a planilha (não precisa do Odoo)
+      modalidade:
+        description: "Modalidade da licença (deixe 'todas'). IDs do SGA são preenchidos após o diagnóstico."
+        type: choice
+        default: "todas"
+        options:
+          - "todas"
+      grupo:
+        description: "Grupo de atividade (deixe 'todos'). IDs do SGA são preenchidos após o diagnóstico."
+        type: choice
+        default: "todos"
+        options:
+          - "todos"
       atividade:
-        description: "Filtro de atividade para o CRM (vazio = todas)"
+        description: "Filtro de texto da atividade para o CRM (vazio = todas)"
         default: "bovino"
       janela_dias:
-        description: "Criar oportunidade para licenças que vencem em até N dias"
-        default: "365"
-      modo:
-        description: "crm (planilha + oportunidades) ou excel (só planilha)"
-        default: "crm"
+        description: "Oportunidade para licenças que vencem em até N dias (vazio = TODAS as licenças)"
+        default: ""
+      municipios:
+        description: "Códigos de município separados por vírgula (vazio = região padrão; TODOS = Paraná)"
+        default: ""
+      diagnostico_combos:
+        description: "Diagnóstico: listar as modalidades e grupos do SGA (id + texto) para montar os menus"
+        type: boolean
+        default: false
   schedule:
     - cron: "10 12 * * 1"
 
@@ -24,10 +45,10 @@ concurrency:
   group: varredura-sga-crm
   cancel-in-progress: false
 
+# Sem timeout-minutes: usa o teto padrão do GitHub Actions (360 min).
 jobs:
   varredura:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -46,10 +67,14 @@ jobs:
           ODOO_DB: ${{ secrets.ODOO_DB }}
           ODOO_EMAIL: ${{ secrets.ODOO_EMAIL }}
           ODOO_API_KEY: ${{ secrets.ODOO_API_KEY }}
-          SGA_MUNICIPIOS: ${{ inputs.municipios }}
+          SGA_MODO: ${{ inputs.modo }}
+          # "todas"/"todos" viram vazio (sem filtro) no script.
+          SGA_MODALIDADE: ${{ inputs.modalidade == 'todas' && '' || inputs.modalidade }}
+          SGA_GRUPO: ${{ inputs.grupo == 'todos' && '' || inputs.grupo }}
           SGA_ATIVIDADE: ${{ inputs.atividade }}
           SGA_JANELA_DIAS: ${{ inputs.janela_dias }}
-          SGA_MODO: ${{ inputs.modo }}
+          SGA_MUNICIPIOS: ${{ inputs.municipios }}
+          SGA_DIAG: ${{ inputs.diagnostico_combos && 'combos' || '' }}
 
       - name: Guardar a planilha
         if: always()
