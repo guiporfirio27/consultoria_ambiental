@@ -16,7 +16,6 @@ ACAO_VERIFICAR = 1423
 
 mapa_area = {'Própria': 'propria', 'Arrendada': 'arrendada', 'Cedida (comodato)': 'comodato',
              'Em parceria': 'parceria', 'Posse (sem escritura)': 'posse'}
-mapa_trab = {'Só eu': 'sozinho', 'Eu e minha família': 'familia', 'Tenho empregados': 'empregados'}
 mapa_app = {'Menos de 10 m': '30', 'De 10 a 50 m': '50', 'Mais de 50 m': '100',
             'Não há rio ou córrego por perto': '30'}
 limites = {'confinado': [100, 300, 700], 'semiconfinado': [200, 650, 1500]}
@@ -68,14 +67,16 @@ for resp in records.sudo():
         sistema = 'confinado'
     elif sist_txt.startswith('Semiconfinado'):
         sistema = 'semiconfinado'
+    elif sist_txt.startswith('Extensivo'):
+        sistema = 'extensivo'
     vacas = int(val.get('vacas_lactacao') or 0)
     vmax = int(val.get('vacas_lactacao_max') or 0)
     area_txt = esc.get('dominialidade', [''])[0]
-    trab_txt = esc.get('quem_trabalha', [''])[0]
+    # Pergunta única desde 16/11/2026: nº de empregados (0 = só a família).
+    tem_emp = 'num_empregados' in val
     n_emp = int(val.get('num_empregados') or 0)
     rio_txt = esc.get('largura_rio', [''])[0]
     coord = val.get('coord_estrutura') or ''
-    coord_dej = val.get('coord_dejetos') or ''
 
     vals = {}
     if 'estrutura_area_m2' in val:
@@ -92,9 +93,9 @@ for resp in records.sudo():
     vals['x_vacas_lactacao_max'] = vmax
     if area_txt in mapa_area:
         vals['x_situacao_area'] = mapa_area[area_txt]
-    if trab_txt in mapa_trab:
-        vals['x_quem_trabalha'] = mapa_trab[trab_txt]
-        vals['x_num_empregados'] = n_emp if trab_txt == 'Tenho empregados' else 0
+    if tem_emp:
+        vals['x_quem_trabalha'] = 'empregados' if n_emp > 0 else 'familia'
+        vals['x_num_empregados'] = n_emp
     if rio_txt in mapa_app:
         vals['x_app_faixa_m'] = mapa_app[rio_txt]
     estr = ', '.join(esc.get('estruturas', []))
@@ -102,7 +103,6 @@ for resp in records.sudo():
     if desc:
         estr = (estr + '\n' + desc).strip()
     vals['x_estruturas'] = estr or False
-    vals['x_coord_dejetos'] = coord_dej or False
     vals['x_local_aplicacao_dejeto'] = (val.get('local_aplicacao') or '') or False
     vals['x_anamnese_resumo'] = resumo.strip() or False
     if emp:
@@ -110,7 +110,14 @@ for resp in records.sudo():
 
     # --- enquadramento (IN 23/2026, Anexo I) ---
     alertas = []
-    if sistema:
+    if sistema == 'extensivo':
+        # Leite extensivo não tem faixa no Anexo I da IN 23/2026.
+        enq = 'A confirmar no IAT (leite extensivo não consta da IN 23/2026, Anexo I) — ' \
+              + str(vacas) + ' vacas em lactação'
+        alertas.append('Sistema extensivo declarado: a IN 23/2026 só traz faixas de leite confinado e '
+                       'semiconfinado. Confirmar o sistema com o cliente (vaca que recebe ração no cocho '
+                       'é semiconfinado) ou consultar o IAT (possível DILA).')
+    elif sistema:
         lim = limites[sistema]
         if vacas <= lim[0]:
             enq = 'DLAM (Micro)'
@@ -134,7 +141,7 @@ for resp in records.sudo():
     if esc.get('supressao', [''])[0] == 'Sim':
         alertas.append('Corte de vegetação nativa previsto: DLAM não se aplica (Decreto 9.541/2025, '
                        'art. 56, I); exige Autorização Florestal.')
-    if trab_txt == 'Tenho empregados' and n_emp > 10:
+    if n_emp > 10:
         alertas.append('Mais de 10 empregados (Decreto 9.541/2025, art. 56, V) — conferir enquadramento.')
     if esc.get('embargo', [''])[0] == 'Sim':
         alertas.append('Cliente declarou embargo ou auto de infração: a declaração de ausência de '
@@ -152,13 +159,8 @@ for resp in records.sudo():
     if not coord:
         alertas.append('Sem localização da estrutura principal: o mapa usará o centro do imóvel no CAR '
                        '— conferir no satélite.')
-    if esc.get('tem_concentracao_dejetos', [''])[0] == 'Sim' and not coord_dej:
-        alertas.append('Há local de concentração de dejetos sem localização — necessária para o croqui '
-                       '(IN 23/2026, Anexo II).')
     if esc.get('tem_nascente', [''])[0] == 'Sim':
         alertas.append('Há nascente, açude ou represa: conferir a APP no mapa.')
-    if esc.get('casa_50m', [''])[0] == 'Sim':
-        alertas.append('Casa a menos de 50 m das instalações (IN 23/2026, art. 68, V).')
 
     texto_alertas = ''
     for a in alertas:

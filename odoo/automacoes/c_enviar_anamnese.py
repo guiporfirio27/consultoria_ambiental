@@ -9,6 +9,10 @@
 #
 # Se já houver um convite em aberto (não concluído), reaproveita o mesmo link
 # em vez de criar outro.
+#
+# Anamnese já concluída: NÃO cria outra (um clique sem querer apagaria a
+# resposta do cliente e travaria o mapa). Só avisa no histórico. Para mandar de
+# novo de propósito, deixe "Status da anamnese" em branco e clique outra vez.
 
 ANAMNESE_SURVEY_ID = 2
 
@@ -22,6 +26,13 @@ for proc in records:
         continue
 
     resp = proc.x_anamnese_resposta_id
+    if proc.x_anamnese_status == 'concluida' and resp and resp.state == 'done':
+        d = str(resp.write_date or '')[:10]
+        quando = (d[8:10] + '/' + d[5:7] + '/' + d[0:4]) if d else 'data não registrada'
+        proc.message_post(body='Anamnese NÃO reenviada: já foi concluída pelo cliente em ' + quando
+                          + '. Para mandar de novo, deixe o campo "Status da anamnese" em branco '
+                          '(aba Anamnese e Mapa) e clique em "Enviar anamnese" outra vez.')
+        continue
     if not resp or resp.state == 'done' or resp.partner_id != parceiro:
         resp = env['survey.user_input'].sudo().create({
             'survey_id': ANAMNESE_SURVEY_ID,

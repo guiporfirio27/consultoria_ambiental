@@ -493,6 +493,23 @@ def registrar_sucesso(odoo, dados, resultado, pdf, avisos):
         notas.append("ATENÇÃO: ponto do mapa = centro do imóvel no CAR (sem localização "
                      "da estrutura). Conferir no satélite antes do protocolo.")
 
+    # 3c. Entorno de 50 m (IN 23/2026, Anexo II e art. 68): só informa, nunca bloqueia.
+    if resultado.get("raio_entorno_m"):
+        if resultado.get("edificacoes_osm_ok") is False:
+            notas.append("OpenStreetMap não respondeu: edificações a menos de 50 m não foram "
+                         "buscadas — conferir no satélite.")
+        elif resultado.get("edificacoes_50m"):
+            notas.append(f"ATENÇÃO: {resultado['edificacoes_50m']} edificação(ões) do OpenStreetMap a "
+                         "menos de 50 m da estrutura (art. 68) — conferir no satélite se são residências.")
+        elif resultado.get("edificacoes_osm_ok"):
+            notas.append("Nenhuma edificação no OpenStreetMap a menos de 50 m (o OSM é incompleto na "
+                         "zona rural: conferir no satélite).")
+    dist_n = resultado.get("dist_nascente_m")
+    if dist_n is not None:
+        alerta = " ATENÇÃO: estrutura dentro da APP de nascente." if dist_n <= 50 else ""
+        notas.append(f"Nascente (base IAT) mais próxima a {dist_n:,.0f} m da estrutura.{alerta}"
+                     .replace(",", "."))
+
     # 4. Conferência da área do recibo x polígono
     recibo = dados.get("car_area_recibo_ha")
     total = resultado.get("area_total_ha")
