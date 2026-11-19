@@ -341,7 +341,10 @@ def diagnostico(municipio, get=requests.get):
 
 def main():
     if os.environ.get("SGA_DIAGNOSTICO", "").lower() in ("1", "true", "sim"):
-        diagnostico(os.environ.get("SGA_DIAGNOSTICO_MUNICIPIO") or "6375")
+        try:
+            diagnostico(os.environ.get("SGA_DIAGNOSTICO_MUNICIPIO") or "6375")
+        except Exception as e:  # o diagnóstico nunca impede a consulta normal
+            print(f"[diagnóstico] falhou: {type(e).__name__}")
     odoo = Odoo(os.environ["ODOO_URL"], os.environ["ODOO_DB"],
                 os.environ["ODOO_EMAIL"], os.environ["ODOO_API_KEY"])
     processar(odoo, limite=int(os.environ.get("SGA_LIMITE") or 30))
