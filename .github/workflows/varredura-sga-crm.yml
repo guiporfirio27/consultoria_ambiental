@@ -1,22 +1,79 @@
 name: Varredura SGA — oportunidades no CRM
 
 # Semanal (segunda, 09:10 BRT = 12:10 UTC) e sob demanda pelo Run workflow.
-# Varre a região, gera a planilha e cria oportunidades de renovação no CRM.
+# Varre a região (Campo Mourão e Ivaiporã por padrão), gera a planilha e cria
+# oportunidades de renovação no CRM.
 on:
   workflow_dispatch:
     inputs:
-      municipios:
-        description: "Códigos separados por vírgula (vazio = região padrão; TODOS = Paraná)"
-        default: ""
+      modo:
+        description: "O que fazer"
+        type: choice
+        default: "crm"
+        options:
+          - "crm"      # gera a planilha E cria oportunidades no CRM
+          - "excel"    # só gera a planilha (não precisa do Odoo)
+      modalidade:
+        description: "Modalidade da licença (texto exato do SGA)"
+        type: choice
+        default: "todas"
+        options:
+          - "todas"
+          - "6 — DLAM - Declaração de Dispensa de Licenciamento Ambiental"
+          - "23 — DLAM - Dispensa de Licenciamento Ambiental Municipal"
+          - "26 — LAC - Licença Ambiental por Adesão e Compromisso"
+          - "27 — RLAC - Renovação de Licença Ambiental por Adesão e Compromisso"
+          - "7 — LAS - Licença Ambiental Simplificada"
+          - "10 — LASR - Licença Ambiental Simplificada de Regularização"
+          - "30 — LAS-A - Licença Ambiental Simplificada de Ampliação"
+          - "8 — RLAS - Renovação de Licença Ambiental Simplificada"
+          - "1 — LP - Licença Prévia"
+          - "2 — LI - Licença de Instalação"
+          - "4 — RLI - Renovação de Licença de Instalação"
+          - "3 — LO - Licença de Operação"
+          - "9 — LOR - Licença de Operação de Regularização"
+          - "5 — RLO - Renovação de Licença de Operação"
+          - "29 — LIR - Licença de Instalação de Regularização"
+          - "25 — CP - Consulta Prévia"
+          - "16 — AA - Autorização Ambiental"
+          - "18 — AF - Autorização Florestal"
+          - "11 — LP-A - Licença Prévia (Ampliação)"
+          - "12 — LI-A - Licença de Instalação (Ampliação)"
+          - "13 — RLI-A - Renovação de Licença de Instalação (Ampliação)"
+          - "14 — LO-A - Licença de Operação (Ampliação)"
+          - "19 — LI-C - Licença de Instalação (Complementar)"
+          - "21 — LO-C - Licença de Operação (Complementar)"
+          - "20 — RLI-C - Renovação de Licença de Instalação (Complementar)"
+      grupo:
+        description: "Grupo de atividade (texto exato do SGA)"
+        type: choice
+        default: "todos"
+        options:
+          - "todos"
+          - "5 — Agropecuária"
+          - "6 — Comércio e Serviço"
+          - "24 — Corte Isolado"
+          - "9 — Destinação final de resíduos sólidos industriais, urbanos ou de serviço de saúde e efluentes"
+          - "28 — Empreendimentos Náuticos"
+          - "29 — Empreendimentos Viários"
+          - "16 — Geração, armazenamento e transmissão de energia"
+          - "10 — Gerenciamento de resíduos sólidos e/ou efluentes"
+          - "8 — Imobiliário"
+          - "1 — Industrial"
+          - "27 — Substituição de Espécies Exóticas"
       atividade:
-        description: "Filtro de atividade para o CRM (vazio = todas)"
+        description: "Filtro de texto da atividade para o CRM (vazio = todas)"
         default: "bovino"
       janela_dias:
-        description: "Criar oportunidade para licenças que vencem em até N dias"
-        default: "365"
-      modo:
-        description: "crm (planilha + oportunidades) ou excel (só planilha)"
-        default: "crm"
+        description: "Oportunidade para licenças que vencem em até N dias (vazio = TODAS as licenças)"
+        default: ""
+      municipios:
+        description: "Códigos de município separados por vírgula (vazio = região padrão; TODOS = Paraná)"
+        default: ""
+      diagnostico_combos:
+        description: "Diagnóstico: listar as modalidades e grupos do SGA (id + texto) para montar os menus"
+        type: boolean
+        default: false
   schedule:
     - cron: "10 12 * * 1"
 
@@ -24,10 +81,10 @@ concurrency:
   group: varredura-sga-crm
   cancel-in-progress: false
 
+# Sem timeout-minutes: usa o teto padrão do GitHub Actions (360 min).
 jobs:
   varredura:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -46,10 +103,14 @@ jobs:
           ODOO_DB: ${{ secrets.ODOO_DB }}
           ODOO_EMAIL: ${{ secrets.ODOO_EMAIL }}
           ODOO_API_KEY: ${{ secrets.ODOO_API_KEY }}
-          SGA_MUNICIPIOS: ${{ inputs.municipios }}
+          SGA_MODO: ${{ inputs.modo }}
+          # "todas"/"todos" viram vazio (sem filtro) no script.
+          SGA_MODALIDADE: ${{ inputs.modalidade == 'todas' && '' || inputs.modalidade }}
+          SGA_GRUPO: ${{ inputs.grupo == 'todos' && '' || inputs.grupo }}
           SGA_ATIVIDADE: ${{ inputs.atividade }}
           SGA_JANELA_DIAS: ${{ inputs.janela_dias }}
-          SGA_MODO: ${{ inputs.modo }}
+          SGA_MUNICIPIOS: ${{ inputs.municipios }}
+          SGA_DIAG: ${{ inputs.diagnostico_combos && 'combos' || '' }}
 
       - name: Guardar a planilha
         if: always()
